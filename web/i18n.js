@@ -112,6 +112,14 @@ const I18N = {
     'agent.sum.moved': '移動 {n} 條到「{s}」', 'agent.sum.copied': '已複製 {n} 條', 'agent.sum.exported': '導出 {n} 條', 'agent.sum.mailboxes': '創建 {n} 個，失敗 {f} 個',
     'agent.confirm.update': '將修改 {n} 個郵箱：', 'agent.confirm.items': '將分別修改 {n} 個郵箱：', 'agent.confirm.move': '將把 {n} 個郵箱移動到「{s}」',
     'agent.confirm.mailbox': '將給 {n} 個郵箱在 @{d} 下創建自建輔助郵箱',
+    'agent.ex5': '查一下第 1 個郵箱輔助郵箱裡最新的驗證碼', 'agent.secrets': '允許讀取密碼', 'agent.secretsTip': '勾選後 AI 可以讀取密碼、2FA 密鑰、令牌的明文（會發送給 AI 服務）',
+    'agent.undo': '撤銷', 'agent.undone': '已撤銷',
+    'agent.sum.added': '新增 {n} 條，跳過重複 {s} 條', 'agent.sum.failed': '{n} 行無法識別', 'agent.sum.deleted': '刪除 {n} 條', 'agent.sum.mails': '{n} 封郵件',
+    'agent.confirm.add': '將新增 {n} 個郵箱到「{s}」：', 'agent.confirm.columns': '寫入列：{s}', 'agent.confirm.delete': '將刪除 {n} 個郵箱（可撤銷）：',
+    'agent.confirm.deleteSheet': '將刪除列表「{s}」及其中的 {n} 個郵箱（可撤銷）', 'agent.confirm.deleteColumn': '將刪除列「{s}」（可撤銷）', 'agent.confirm.deleteGroup': '將刪除分組「{s}」（郵箱不會刪除）',
+    'agent.tool.find_in_all_sheets': '跨列表查找', 'agent.tool.set_table': '排序/翻頁', 'agent.tool.add_accounts': '新增郵箱', 'agent.tool.import_text': '導入',
+    'agent.tool.delete_accounts': '刪除郵箱', 'agent.tool.manage_columns': '列', 'agent.tool.manage_groups': '分組', 'agent.tool.manage_sheets': '列表',
+    'agent.tool.get_2fa_codes': '2FA 驗證碼', 'agent.tool.fetch_mail': '收信', 'agent.tool.open_account': '打開', 'agent.tool.set_preferences': '設置', 'agent.tool.undo': '撤銷',
   },
 
   'zh-Hans': {
@@ -226,6 +234,14 @@ const I18N = {
     'agent.sum.moved': '移动 {n} 条到「{s}」', 'agent.sum.copied': '已复制 {n} 条', 'agent.sum.exported': '导出 {n} 条', 'agent.sum.mailboxes': '创建 {n} 个，失败 {f} 个',
     'agent.confirm.update': '将修改 {n} 个邮箱：', 'agent.confirm.items': '将分别修改 {n} 个邮箱：', 'agent.confirm.move': '将把 {n} 个邮箱移动到「{s}」',
     'agent.confirm.mailbox': '将给 {n} 个邮箱在 @{d} 下创建自建辅助邮箱',
+    'agent.ex5': '查一下第 1 个邮箱辅助邮箱里最新的验证码', 'agent.secrets': '允许读取密码', 'agent.secretsTip': '勾选后 AI 可以读取密码、2FA 密钥、令牌的明文（会发送给 AI 服务）',
+    'agent.undo': '撤销', 'agent.undone': '已撤销',
+    'agent.sum.added': '新增 {n} 条，跳过重复 {s} 条', 'agent.sum.failed': '{n} 行无法识别', 'agent.sum.deleted': '删除 {n} 条', 'agent.sum.mails': '{n} 封邮件',
+    'agent.confirm.add': '将新增 {n} 个邮箱到「{s}」：', 'agent.confirm.columns': '写入列：{s}', 'agent.confirm.delete': '将删除 {n} 个邮箱（可撤销）：',
+    'agent.confirm.deleteSheet': '将删除列表「{s}」及其中的 {n} 个邮箱（可撤销）', 'agent.confirm.deleteColumn': '将删除列「{s}」（可撤销）', 'agent.confirm.deleteGroup': '将删除分组「{s}」（邮箱不会删除）',
+    'agent.tool.find_in_all_sheets': '跨列表查找', 'agent.tool.set_table': '排序/翻页', 'agent.tool.add_accounts': '新增邮箱', 'agent.tool.import_text': '导入',
+    'agent.tool.delete_accounts': '删除邮箱', 'agent.tool.manage_columns': '列', 'agent.tool.manage_groups': '分组', 'agent.tool.manage_sheets': '列表',
+    'agent.tool.get_2fa_codes': '2FA 验证码', 'agent.tool.fetch_mail': '收信', 'agent.tool.open_account': '打开', 'agent.tool.set_preferences': '设置', 'agent.tool.undo': '撤销',
   },
 
   en: {
@@ -340,6 +356,14 @@ const I18N = {
     'agent.sum.moved': '{n} moved to "{s}"', 'agent.sum.copied': '{n} copied', 'agent.sum.exported': '{n} exported', 'agent.sum.mailboxes': '{n} created, {f} failed',
     'agent.confirm.update': 'Update {n} accounts:', 'agent.confirm.items': 'Update {n} accounts individually:', 'agent.confirm.move': 'Move {n} accounts to "{s}"',
     'agent.confirm.mailbox': 'Create recovery mailboxes on @{d} for {n} accounts',
+    'agent.ex5': 'Get the latest verification code in the recovery mailbox of row 1', 'agent.secrets': 'Allow reading passwords', 'agent.secretsTip': 'When ticked, the AI can read passwords, 2FA secrets and tokens in plain text (they are sent to the AI service)',
+    'agent.undo': 'Undo', 'agent.undone': 'Undone',
+    'agent.sum.added': '{n} added, {s} duplicates skipped', 'agent.sum.failed': '{n} lines not recognized', 'agent.sum.deleted': '{n} deleted', 'agent.sum.mails': '{n} messages',
+    'agent.confirm.add': 'Add {n} accounts to "{s}":', 'agent.confirm.columns': 'Columns: {s}', 'agent.confirm.delete': 'Delete {n} accounts (can be undone):',
+    'agent.confirm.deleteSheet': 'Delete list "{s}" and its {n} accounts (can be undone)', 'agent.confirm.deleteColumn': 'Delete column "{s}" (can be undone)', 'agent.confirm.deleteGroup': 'Delete group "{s}" (accounts are kept)',
+    'agent.tool.find_in_all_sheets': 'Search all lists', 'agent.tool.set_table': 'Sort / page', 'agent.tool.add_accounts': 'Add accounts', 'agent.tool.import_text': 'Import',
+    'agent.tool.delete_accounts': 'Delete accounts', 'agent.tool.manage_columns': 'Columns', 'agent.tool.manage_groups': 'Groups', 'agent.tool.manage_sheets': 'Lists',
+    'agent.tool.get_2fa_codes': '2FA codes', 'agent.tool.fetch_mail': 'Fetch mail', 'agent.tool.open_account': 'Open', 'agent.tool.set_preferences': 'Settings', 'agent.tool.undo': 'Undo',
   },
 
   ja: {
@@ -454,6 +478,14 @@ const I18N = {
     'agent.sum.moved': '{n} 件を「{s}」へ移動', 'agent.sum.copied': '{n} 件をコピー', 'agent.sum.exported': '{n} 件をエクスポート', 'agent.sum.mailboxes': '作成 {n} 件、失敗 {f} 件',
     'agent.confirm.update': '{n} 件を変更します：', 'agent.confirm.items': '{n} 件を個別に変更します：', 'agent.confirm.move': '{n} 件を「{s}」へ移動します',
     'agent.confirm.mailbox': '{n} 件に @{d} の予備メールを作成します',
+    'agent.ex5': '1 行目の予備メールに届いた最新の確認コードを調べて', 'agent.secrets': 'パスワードの読み取りを許可', 'agent.secretsTip': 'チェックすると AI がパスワード・2FA シークレット・トークンを読めます（AI サービスに送信されます）',
+    'agent.undo': '元に戻す', 'agent.undone': '元に戻しました',
+    'agent.sum.added': '{n} 件追加、重複 {s} 件をスキップ', 'agent.sum.failed': '{n} 行を認識できません', 'agent.sum.deleted': '{n} 件削除', 'agent.sum.mails': '{n} 通',
+    'agent.confirm.add': '「{s}」に {n} 件を追加します：', 'agent.confirm.columns': '列：{s}', 'agent.confirm.delete': '{n} 件を削除します（元に戻せます）：',
+    'agent.confirm.deleteSheet': 'リスト「{s}」と {n} 件のメールを削除します（元に戻せます）', 'agent.confirm.deleteColumn': '列「{s}」を削除します（元に戻せます）', 'agent.confirm.deleteGroup': 'グループ「{s}」を削除します（メールは残ります）',
+    'agent.tool.find_in_all_sheets': '全リスト検索', 'agent.tool.set_table': '並べ替え/ページ', 'agent.tool.add_accounts': 'メール追加', 'agent.tool.import_text': 'インポート',
+    'agent.tool.delete_accounts': 'メール削除', 'agent.tool.manage_columns': '列', 'agent.tool.manage_groups': 'グループ', 'agent.tool.manage_sheets': 'リスト',
+    'agent.tool.get_2fa_codes': '2FA コード', 'agent.tool.fetch_mail': '受信', 'agent.tool.open_account': '開く', 'agent.tool.set_preferences': '設定', 'agent.tool.undo': '元に戻す',
   },
 };
 

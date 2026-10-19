@@ -111,7 +111,7 @@ const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize:
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
   colOrders: {}, colWidths: {},  // 列順序按列表分別記（自定義列每個列表不同），_default 是最近一次調整的順序
   importMode: 'smart', importOrder: ['email', 'password', 'totp_secret', 'recovery_email', 'skip', 'skip'],
-  mailAuto: true, mailAutoCopy: false, agentAuto: false };
+  mailAuto: true, mailAutoCopy: false, agentAuto: false, agentSecrets: false };
 // 常用的 OpenAI 兼容服務，設置裡一鍵填入
 const AI_PRESETS = [
   { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },

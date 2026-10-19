@@ -732,12 +732,31 @@ class Api:
                          + [status, group_id or None, json.dumps(row_extra, ensure_ascii=False), now, now])
         cols = ", ".join(FIELDS)
         marks = ", ".join("?" for _ in FIELDS)
-        self._store.executemany(
-            f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
-            f"VALUES (?, {marks}, ?, ?, ?, ?, ?)",
-            batch,
-        )
-        return {"added": len(batch), "skipped": skipped}
+        sql = (f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
+               f"VALUES (?, {marks}, ?, ?, ?, ?, ?)")
+        ids = []
+        st = self._store
+        with st.lock:  # 逐條插入以拿到新 id（AI 助手撤銷用），一次提交
+            for row in batch:
+                ids.append(st.conn.execute(sql, row).lastrowid)
+            st.conn.commit()
+        return {"added": len(batch), "skipped": skipped, "ids": ids}
+
+    @need_unlock
+    def restore_accounts(self, rows):
+        """撤銷用：按 id 把賬號恢復成給定的完整內容（已刪除的按原 id 重新插入）。"""
+        now = int(time.time())
+        cols = FIELDS + ["sheet_id", "status", "group_id", "extra", "created_at", "updated_at"]
+        sql = f"INSERT OR REPLACE INTO accounts(id, {', '.join(cols)}) VALUES ({', '.join('?' for _ in range(len(cols) + 1))})"
+        st = self._store
+        with st.lock:
+            for r in rows or []:
+                values = {f: str(r.get(f) or "") for f in FIELDS}
+                self._encrypt_row(values)
+                st.conn.execute(sql, [int(r["id"])] + [values[f] for f in FIELDS] + [
+                    int(r["sheet_id"]), r.get("status") or STATUSES[0], r.get("group_id") or None,
+                    json.dumps(r.get("extra") or {}, ensure_ascii=False), int(r.get("created_at") or now), now])
+            st.conn.commit()
 
     @need_unlock
     def save_export(self, filename, content):
