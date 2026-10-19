@@ -191,6 +191,22 @@ const AgentMixin = {
         .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
         .replace(/^#{1,4}\s*(.+)$/gm, '<b>$1</b>');
     },
+    agentPretty(json) {
+      try { return JSON.stringify(JSON.parse(json), null, 1).slice(0, 4000); } catch { return String(json || '').slice(0, 4000); }
+    },
+    // 對話記錄（含工具調用的參數和結果），方便排查 AI 做了什麼
+    agentTranscript() {
+      const lines = [];
+      for (const m of this.agent.items) {
+        if (m.role === 'user') lines.push(`【${t('agent.you')}】\n${m.text}`);
+        else {
+          if (m.text) lines.push(`【AI】\n${m.text}`);
+          for (const tc of m.tools || []) lines.push(`  → ${tc.name} ${tc.args}\n  ← ${tc.status}: ${(tc.result || tc.summary || '').slice(0, 1500)}`);
+          if (m.error) lines.push(`  ✕ ${m.error}`);
+        }
+      }
+      this.copy(lines.join('\n\n'), t('agent.transcript'), true);
+    },
     async agentUndoClick(tc) {
       try {
         const r = await this.agentUndo(tc.undoId);
@@ -252,7 +268,8 @@ const AgentMixin = {
           : { role: 'assistant', content: item.text });
         if (!calls.length) return;
         for (const c of calls) {
-          item.tools.push({ name: c.function.name, status: 'running', summary: '', desc: '', danger: false, resolve: null, undoId: '' });
+          item.tools.push({ name: c.function.name, status: 'running', summary: '', desc: '', danger: false, resolve: null, undoId: '',
+            args: c.function.arguments || '{}', result: '', open: false });
           const tc = item.tools[item.tools.length - 1];
           this.agentScroll();
           let out;
@@ -267,7 +284,9 @@ const AgentMixin = {
           tc.status = out.error ? 'error' : 'done';
           tc.summary = out.error ? String(out.error) : this.agentSummary(c.function.name, out);
           if (out.undo_id) tc.undoId = out.undo_id;
-          agent.history.push({ role: 'tool', tool_call_id: c.id, content: JSON.stringify(out).slice(0, 30000) });
+          const content = JSON.stringify(out).slice(0, 30000);
+          tc.result = content;
+          agent.history.push({ role: 'tool', tool_call_id: c.id, content });
         }
         if (agent.stop) return;
       }
@@ -318,6 +337,7 @@ const AgentMixin = {
       return `你是「郵箱管理」桌面軟件內置的 AI 助手（agent）。你能通過工具完成這個軟件裡幾乎所有的操作：用戶讓你做什麼，就直接調用工具去做完，而不是教用戶自己去點界面。
 能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表；查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
 工作方式：
+- 你擁有上面列出的全部工具。不要說「我沒有這個功能」「需要你在軟件裡手動操作」，先看工具能不能組合完成；只有工具確實做不到時才這樣說。
 - 多步任務就連續調用多個工具一次做完。信息不足時先用查詢類工具弄清楚；只有確實無法判斷用戶意圖時才提問。
 - 用戶給了賬號數據要導入/添加：原始文本直接 import_text（無法識別的行你自己整理後用 add_accounts 補上）；你已經理解了字段就用 add_accounts。可以同時指定分組、狀態、國家、自定義列（例如「編號」）。
 - 需要的分組、列、列表不存在時，工具會自動創建，不用先問用戶。
@@ -326,7 +346,16 @@ const AgentMixin = {
 - 字符串值可用模板 {email} {user} {domain} {index} {random}（隨機密碼）。
 - 密碼：${secrets}
 - 用戶想「看 / 找 / 篩選」時，用 set_view 或 select_rows(show_only=true) 把結果顯示在表格裡。
-- 完成後用一兩句話總結做了什麼、影響多少條；工具報錯時根據錯誤調整參數重試。不要編造工具沒有返回的數據。用用戶的語言回答。
+- 完成後用一兩句話總結做了什麼、影響多少條；工具報錯時根據錯誤調整參數重試，連續失敗再如實告訴用戶錯誤原因。不要編造工具沒有返回的數據。用用戶的語言回答。
+示例（意圖 → 調用）：
+- 「導入下面郵箱，分組 222，編號寫進編號列：a@x.com----pw----備註----7----2FA密鑰 …」→ add_accounts({accounts:[{email:"a@x.com",password:"pw",notes:"備註",totp_secret:"2FA密鑰",columns:{"編號":"7"}}, …], group:"222"})
+- 「把這段賬號加進來」（格式雜亂）→ import_text({text: 原文})，再用 add_accounts 補上 failed 的行
+- 「把 outlook 的都移到 微軟 分組並標紅」→ update_accounts({filter:{conditions:[{field:"domain",op:"contains",value:"outlook"}]}, set:{group:"微軟"}, columns:{"顏色標記":"紅"}})
+- 「第 5 到 20 個狀態改封禁」→ update_accounts({filter:{rows:{from:5,to:20}}, set:{status:"封禁"}})
+- 「有沒有重複的郵箱」→ count_accounts({group_by:"email"})
+- 「user1 的驗證碼 / 輔助郵箱收到的驗證碼」→ get_2fa_codes / fetch_mail
+- 「把備註列放到郵箱後面，隱藏手機號」→ manage_columns(move …) + manage_columns(hide …)
+- 「剛才改錯了」→ undo
 當前狀態：${JSON.stringify(ctx)}`;
     },
 

@@ -11,7 +11,15 @@ import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
 
-TIMEOUT = 15
+TIMEOUT = 10
+
+
+def _conn_error(e):
+    """連接錯誤。握手/讀取超時單獨提示：多半是服務器沒在正常響應（容器停了、被防火牆攔截）。"""
+    reason = getattr(e, "reason", None) or e
+    if isinstance(reason, TimeoutError) or "timed out" in str(reason):
+        return ConnectionError("err.admin_timeout")
+    return ConnectionError(f"err.admin_connect|{reason}")
 
 
 class BillionMailAdmin:
@@ -46,7 +54,7 @@ class BillionMailAdmin:
             except Exception:
                 raise PermissionError(f"err.admin_http|{e.code}")
         except (OSError, ValueError) as e:
-            raise ConnectionError(f"err.admin_connect|{e}")
+            raise _conn_error(e) from None
 
     def login(self):
         if not self.base:
@@ -54,8 +62,10 @@ class BillionMailAdmin:
         if self.safe_path:  # 過安全入口，拿 session cookie
             try:
                 self._opener.open(urllib.request.Request(self.base + self.safe_path), timeout=TIMEOUT)
-            except Exception:
-                pass
+            except urllib.error.HTTPError:
+                pass  # 有響應就行
+            except (OSError, ValueError) as e:  # 連不上就不用再試登錄了，直接報錯（避免多等一輪超時）
+                raise _conn_error(e) from None
         j = self._call("POST", "/api/login", {"username": self.user, "password": self.password})
         self.token = (j.get("data") or {}).get("token")
         if not self.token:

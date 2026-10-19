@@ -474,9 +474,17 @@ const app = createApp({
     },
 
     // ---------- 自動創建自建郵箱（BillionMail 管理員模式） ----------
+    // 可選的自建域名：先用設置裡填的「自建域名」立即顯示，後台（BillionMail）的域名列表取到後再合併進來，
+    // 後台連不上也不影響選擇（創建時會提示錯誤）
     loadSelfDomains() {
-      if (!this.mailCfg?.admin_enabled || !this.mailCfg?.panel_url) { this.selfDomains = []; return; }
-      call('selfmail_domains').then(r => { this.selfDomains = r.admin ? r.domains : []; }).catch(() => { this.selfDomains = []; });
+      const cfg = this.mailCfg;
+      if (!cfg?.admin_enabled || !cfg?.panel_url) { this.selfDomains = []; return; }
+      const configured = (cfg.domains || '').toLowerCase().split(/[\s,，;]+/).filter(Boolean);
+      this.selfDomains = configured;
+      call('selfmail_domains').then(r => {
+        if (this.mailCfg !== cfg) return;
+        this.selfDomains = [...new Set([...configured, ...(r.domains || [])])];
+      }).catch(() => {});
     },
     // 編輯窗口：輔助郵箱類型選「自建 @域名」→ 用主郵箱的用戶名創建郵箱，隨機密碼，自動填入
     async onRecType() {

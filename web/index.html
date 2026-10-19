@@ -260,6 +260,7 @@
     <div class="agent-head">
       <b>🤖 {{ t('agent.title') }}</b>
       <span class="spacer"></span>
+      <button class="icon-btn" :title="t('agent.transcript')" :disabled="!agent.items.length" @click="agentTranscript">📋</button>
       <button class="icon-btn" :title="t('agent.clear')" @click="agentClear">⟲</button>
       <button class="icon-btn" @click="agent.open = false">✕</button>
     </div>
@@ -277,14 +278,18 @@
         <div v-if="m.text && m.role === 'user'" class="bubble">{{ m.text }}</div>
         <div v-else-if="m.text" class="bubble" v-html="agentMd(m.text)"></div>
         <div v-for="(tc, j) in m.tools" :key="j" class="agent-tool" :class="[tc.status, {danger: tc.danger}]">
-          <div class="agent-tool-row">
+          <div class="agent-tool-row" :title="t('agent.details')" @click="tc.open = !tc.open">
             <span v-if="tc.status === 'running'" class="spinner"></span>
             <span v-else>{{ tc.status === 'error' ? '⚠' : tc.status === 'confirm' ? '❓' : '✓' }}</span>
             <span>{{ agentToolLabel(tc.name) }}</span>
             <span class="muted ellipsis" :title="tc.summary">{{ tc.summary }}</span>
             <span class="spacer"></span>
-            <button v-if="tc.undoId && !agent.busy" class="link" @click="agentUndoClick(tc)">↶ {{ t('agent.undo') }}</button>
+            <button v-if="tc.undoId && !agent.busy" class="link" @click.stop="agentUndoClick(tc)">↶ {{ t('agent.undo') }}</button>
             <span v-else-if="tc.undone" class="muted">{{ t('agent.undone') }}</span>
+          </div>
+          <div v-if="tc.open" class="agent-detail">
+            <div class="muted">{{ t('agent.args') }}</div><pre>{{ agentPretty(tc.args) }}</pre>
+            <template v-if="tc.result"><div class="muted">{{ t('agent.result') }}</div><pre>{{ agentPretty(tc.result) }}</pre></template>
           </div>
           <div v-if="tc.status === 'confirm'" class="agent-confirm">
             <div class="agent-desc">{{ tc.desc }}</div>
