@@ -3,7 +3,7 @@ const I18N = {
   'zh-Hant': {
     'app.title': '郵箱管理',
     'side.sheets': '列表', 'side.groups': '分組', 'side.dataFile': '數據文件',
-    'sheet.add': '新增列表', 'sheet.rename': '重命名列表', 'sheet.delete': '刪除列表', 'sheet.dblclick': '雙擊重命名',
+    'sheet.add': '新增列表', 'sheet.rename': '重命名列表', 'sheet.delete': '刪除列表', 'sheet.dblclick': '雙擊重命名，拖動調整順序', 'group.dragTip': '拖動調整順序',
     'sheet.namePrompt': '列表名稱', 'sheet.newName': '新列表', 'sheet.default': '默認列表',
     'sheet.deleteConfirm': '確定刪除「{name}」及其中的 {n} 個郵箱嗎？此操作不可恢復。', 'sheet.deleted': '已刪除列表',
     'group.manage': '管理分組', 'group.all': '全部', 'group.none': '未分組', 'group.name': '分組名稱', 'group.delete': '刪除分組',
@@ -125,7 +125,7 @@ const I18N = {
   'zh-Hans': {
     'app.title': '邮箱管理',
     'side.sheets': '列表', 'side.groups': '分组', 'side.dataFile': '数据文件',
-    'sheet.add': '新增列表', 'sheet.rename': '重命名列表', 'sheet.delete': '删除列表', 'sheet.dblclick': '双击重命名',
+    'sheet.add': '新增列表', 'sheet.rename': '重命名列表', 'sheet.delete': '删除列表', 'sheet.dblclick': '双击重命名，拖动调整顺序', 'group.dragTip': '拖动调整顺序',
     'sheet.namePrompt': '列表名称', 'sheet.newName': '新列表', 'sheet.default': '默认列表',
     'sheet.deleteConfirm': '确定删除「{name}」及其中的 {n} 个邮箱吗？此操作不可恢复。', 'sheet.deleted': '已删除列表',
     'group.manage': '管理分组', 'group.all': '全部', 'group.none': '未分组', 'group.name': '分组名称', 'group.delete': '删除分组',
@@ -247,7 +247,7 @@ const I18N = {
   en: {
     'app.title': 'Mail Manager',
     'side.sheets': 'Lists', 'side.groups': 'Groups', 'side.dataFile': 'Data file',
-    'sheet.add': 'New list', 'sheet.rename': 'Rename list', 'sheet.delete': 'Delete list', 'sheet.dblclick': 'Double-click to rename',
+    'sheet.add': 'New list', 'sheet.rename': 'Rename list', 'sheet.delete': 'Delete list', 'sheet.dblclick': 'Double-click to rename, drag to reorder', 'group.dragTip': 'Drag to reorder',
     'sheet.namePrompt': 'List name', 'sheet.newName': 'New list', 'sheet.default': 'Default list',
     'sheet.deleteConfirm': 'Delete "{name}" and its {n} accounts? This cannot be undone.', 'sheet.deleted': 'List deleted',
     'group.manage': 'Manage groups', 'group.all': 'All', 'group.none': 'Ungrouped', 'group.name': 'Group name', 'group.delete': 'Delete group',
@@ -369,7 +369,7 @@ const I18N = {
   ja: {
     'app.title': 'メール管理',
     'side.sheets': 'リスト', 'side.groups': 'グループ', 'side.dataFile': 'データファイル',
-    'sheet.add': 'リストを追加', 'sheet.rename': 'リスト名を変更', 'sheet.delete': 'リストを削除', 'sheet.dblclick': 'ダブルクリックで名前を変更',
+    'sheet.add': 'リストを追加', 'sheet.rename': 'リスト名を変更', 'sheet.delete': 'リストを削除', 'sheet.dblclick': 'ダブルクリックで名前変更、ドラッグで並べ替え', 'group.dragTip': 'ドラッグで並べ替え',
     'sheet.namePrompt': 'リスト名', 'sheet.newName': '新しいリスト', 'sheet.default': 'デフォルトリスト',
     'sheet.deleteConfirm': '「{name}」と中の {n} 件のアカウントを削除しますか？元に戻せません。', 'sheet.deleted': 'リストを削除しました',
     'group.manage': 'グループ管理', 'group.all': 'すべて', 'group.none': '未分類', 'group.name': 'グループ名', 'group.delete': 'グループを削除',

@@ -118,12 +118,18 @@ const AGENT_TOOLS = [
     before: { type: 'string', description: 'move：放到這一列前面' }, after: { type: 'string', description: 'move：放到這一列後面' },
     position: { type: 'integer', description: 'move：第幾列（從 1 開始）' }, width: { type: 'integer', description: 'resize：像素' },
   }, ['action']),
-  agentFn('manage_groups', '管理分組：list / create / rename / recolor / delete（刪除分組不刪郵箱）', {
-    action: { type: 'string', enum: ['list', 'create', 'rename', 'recolor', 'delete'] }, name: AGENT_STR, new_name: AGENT_STR,
+  agentFn('manage_groups', '管理側邊欄的分組（不是表格裡的「分組」列）：list / create / rename / recolor / move（調整分組在側邊欄的順序）/ delete（刪除分組不刪郵箱）', {
+    action: { type: 'string', enum: ['list', 'create', 'rename', 'recolor', 'move', 'delete'] }, name: AGENT_STR, new_name: AGENT_STR,
     color: { type: 'string', description: '#hex 或顏色名' },
+    position: { type: 'integer', description: 'move：移到第幾個（1 = 最前面，-1 = 最後面）' },
+    before: { type: 'string', description: 'move：放到這個名稱前面' }, after: { type: 'string', description: 'move：放到這個名稱後面' },
+    offset: { type: 'integer', description: 'move：相對移動，-1 = 上移一位，2 = 下移兩位' },
   }, ['action']),
-  agentFn('manage_sheets', '管理列表：list / create / rename / switch（切換表格顯示的列表，之後的操作針對它）/ delete（連同郵箱，用戶會確認，可撤銷）', {
-    action: { type: 'string', enum: ['list', 'create', 'rename', 'switch', 'delete'] }, name: AGENT_STR, new_name: AGENT_STR,
+  agentFn('manage_sheets', '管理側邊欄的列表：list / create / rename / switch（切換表格顯示的列表，之後的操作針對它）/ move（調整列表順序）/ delete（連同郵箱，用戶會確認，可撤銷）', {
+    action: { type: 'string', enum: ['list', 'create', 'rename', 'switch', 'move', 'delete'] }, name: AGENT_STR, new_name: AGENT_STR,
+    position: { type: 'integer', description: 'move：移到第幾個（1 = 最前面，-1 = 最後面）' },
+    before: { type: 'string', description: 'move：放到這個名稱前面' }, after: { type: 'string', description: 'move：放到這個名稱後面' },
+    offset: { type: 'integer', description: 'move：相對移動，-1 = 上移一位，2 = 下移兩位' },
   }, ['action']),
   agentFn('get_2fa_codes', '獲取郵箱當前的 2FA 驗證碼（6 位，30 秒有效）', { filter: AGENT_FILTER }),
   agentFn('fetch_mail', '收取郵箱的最新郵件（自建 BillionMail / 微軟郵箱），返回發件人、標題、時間、提取到的驗證碼和正文摘要', {
@@ -337,7 +343,13 @@ const AgentMixin = {
       return `你是「郵箱管理」桌面軟件內置的 AI 助手（agent）。你能通過工具完成這個軟件裡幾乎所有的操作：用戶讓你做什麼，就直接調用工具去做完，而不是教用戶自己去點界面。
 能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表；查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
 工作方式：
-- 你擁有上面列出的全部工具。不要說「我沒有這個功能」「需要你在軟件裡手動操作」，先看工具能不能組合完成；只有工具確實做不到時才這樣說。
+- 你擁有上面列出的全部工具。不要說「我沒有這個功能」「需要你在軟件裡手動操作」，也不要提「改名繞過」之類的變通辦法，先看工具能不能直接完成；只有工具確實做不到時才這樣說。
+- 先根據「當前狀態」裡的 groups（側邊欄分組，按顯示順序）、sheets（列表）、columns（表格列）判斷用戶說的名字指的是什麼：
+  · 名字是某個分組 / 列表的名稱（例如「分組 29」「分組名稱 29」「29 這個分組」），「移到第一 / 最前 / 置頂 / 第 N 個 / 上移 / 下移 / 放最後」就是調整它在側邊欄的順序（manage_groups / manage_sheets 的 move）——即使用戶說的是「第一列」，這裡的「列」只是口語的「第一位」。
+  · 只有名字是表格列名（序號、郵箱、密碼、分組列、備註、自定義列…）時，才是調整表格的列（manage_columns）。
+  · 「把郵箱放進 / 移到 29 分組」是改郵箱的分組（update_accounts set.group），不是調整分組順序。
+  · 名字同時能對上兩種、又看不出指哪個時，簡短地問一句再做。
+- 用戶糾正你（「不是這個意思」「我說的是…」「錯了」）：先用 undo 撤銷剛才理解錯的那一步，再按正確的理解重新做，並說明已撤銷了什麼。
 - 多步任務就連續調用多個工具一次做完。信息不足時先用查詢類工具弄清楚；只有確實無法判斷用戶意圖時才提問。
 - 用戶給了賬號數據要導入/添加：原始文本直接 import_text（無法識別的行你自己整理後用 add_accounts 補上）；你已經理解了字段就用 add_accounts。可以同時指定分組、狀態、國家、自定義列（例如「編號」）。
 - 需要的分組、列、列表不存在時，工具會自動創建，不用先問用戶。
@@ -354,7 +366,9 @@ const AgentMixin = {
 - 「第 5 到 20 個狀態改封禁」→ update_accounts({filter:{rows:{from:5,to:20}}, set:{status:"封禁"}})
 - 「有沒有重複的郵箱」→ count_accounts({group_by:"email"})
 - 「user1 的驗證碼 / 輔助郵箱收到的驗證碼」→ get_2fa_codes / fetch_mail
-- 「把備註列放到郵箱後面，隱藏手機號」→ manage_columns(move …) + manage_columns(hide …)
+- 「把備註列放到郵箱後面，隱藏手機號」→ manage_columns({action:"move",name:"備註",after:"郵箱"}) + manage_columns({action:"hide",name:"手機號"})
+- 「分組 29 移到第一個 / 置頂」→ manage_groups({action:"move",name:"29",position:1})；「29 分組往上移一位」→ manage_groups({action:"move",name:"29",offset:-1})
+- 「把 新號 分組放到 222 後面」→ manage_groups({action:"move",name:"新號",after:"222"})；「默認列表放最後」→ manage_sheets({action:"move",name:"默認列表",position:-1})
 - 「剛才改錯了」→ undo
 當前狀態：${JSON.stringify(ctx)}`;
     },
@@ -471,6 +485,8 @@ const AgentMixin = {
         rows = rows.map(r => ({ ...r, sheet_id: newId }));
       }
       if (u.columns) await call('set_sheet_columns', u.columns.sheetId, u.columns.columns);
+      if (u.prefs) Object.assign(this.prefs, JSON.parse(JSON.stringify(u.prefs)));
+      if (u.order) await call('reorder', u.order.kind, u.order.ids);
       if (u.addedIds?.length) await call('delete_accounts', u.addedIds);
       if (rows.length) await call('restore_accounts', rows);
       for (const m of this.agent.items) for (const tc of m.tools || []) if (tc.undoId === u.id) { tc.undoId = ''; tc.undone = true; }
@@ -947,6 +963,7 @@ const AgentMixin = {
         }
         case 'show': case 'hide': {
           const keys = (args.names?.length ? args.names : [args.name]).map(needKey);
+          this.agentPushLayoutUndo();
           const visible = { ...this.prefs.visible };
           for (const k of keys) visible[k] = k === 'email' || args.action === 'show';
           this.prefs.visible = visible;
@@ -960,15 +977,18 @@ const AgentMixin = {
           else if (args.after) pos = keys.indexOf(needKey(args.after)) + 1;
           else pos = Math.max(0, Math.min(keys.length, (parseInt(args.position, 10) || 1) - 1));
           keys.splice(pos, 0, key);
+          const undoId = this.agentPushLayoutUndo();
           this.saveColumnOrder(keys);
-          return { order: this.allColumns.map(c => c.label) };
+          return { order: this.allColumns.map(c => c.label), undo_id: undoId };
         }
         case 'resize': {
           const key = needKey(args.name);
+          this.agentPushLayoutUndo();
           this.prefs.colWidths = { ...this.prefs.colWidths, [key]: Math.max(MIN_COL_WIDTH, parseInt(args.width, 10) || 120) };
           return { ok: true };
         }
         case 'reset_layout': {
+          this.agentPushLayoutUndo();
           const orders = { ...this.prefs.colOrders };
           delete orders[this.sheetId];
           delete orders._default;
@@ -995,6 +1015,7 @@ const AgentMixin = {
           await this.refreshState();
           return { ok: true };
         }
+        case 'move': return this.agentMoveItem('groups', find(), args);
         case 'delete': {
           const g = find();
           await call('delete_group', g.id);
@@ -1006,6 +1027,38 @@ const AgentMixin = {
       }
       return { error: 'unknown action ' + args.action };
     },
+    // 列佈局（順序、顯示、寬度）改動前存快照，可撤銷
+    agentPushLayoutUndo() {
+      const { colOrders, visible, colWidths } = this.prefs;
+      return this.agentPushUndo(t('agent.tool.manage_columns'), { prefs: JSON.parse(JSON.stringify({ colOrders, visible, colWidths })) });
+    },
+    // 調整分組 / 列表在側邊欄的順序
+    async agentMoveItem(kind, item, args) {
+      const list = kind === 'groups' ? this.groups : this.sheets;
+      const label = x => (kind === 'groups' ? x.name : this.sheetName(x));
+      const findName = n => {
+        const x = list.find(y => label(y).toLowerCase() === String(n).trim().toLowerCase() || y.name.toLowerCase() === String(n).trim().toLowerCase());
+        if (!x) throw new Error(`no ${kind === 'groups' ? 'group' : 'sheet'} "${n}"`);
+        return x;
+      };
+      const ids = list.map(x => x.id);
+      const rest = ids.filter(id => id !== item.id);
+      let pos;
+      if (args.before) pos = rest.indexOf(findName(args.before).id);
+      else if (args.after) pos = rest.indexOf(findName(args.after).id) + 1;
+      else if (args.offset) pos = ids.indexOf(item.id) + parseInt(args.offset, 10);
+      else {
+        const p = parseInt(args.position, 10) || 1;
+        pos = p < 0 ? rest.length + 1 + p : p - 1;
+      }
+      pos = Math.max(0, Math.min(rest.length, pos));
+      rest.splice(pos, 0, item.id);
+      const undoId = this.agentPushUndo(t('agent.tool.manage_' + kind) + ' ' + label(item), { order: { kind, ids } });
+      await call('reorder', kind, rest);
+      await this.refreshState();
+      const now = kind === 'groups' ? this.groups : this.sheets;
+      return { order: now.map(label), undo_id: undoId };
+    },
     async agentManageSheets(args) {
       const name = String(args.name || '').trim();
       switch (args.action) {
@@ -1015,6 +1068,11 @@ const AgentMixin = {
           await call('add_sheet', name);
           await this.refreshState();
           return { created: name };
+        }
+        case 'move': {
+          const s = this.agentSheet(name);
+          if (!s) return { error: `no sheet "${name}"`, sheets: this.sheets.map(x => this.sheetName(x)) };
+          return this.agentMoveItem('sheets', s, args);
         }
         case 'rename': {
           const s = this.agentSheet(name);

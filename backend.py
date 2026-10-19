@@ -299,7 +299,8 @@ class Api:
     @need_unlock
     def add_sheet(self, name):
         name = (name or "").strip() or "新列表"
-        return self._store.execute("INSERT INTO sheets(name) VALUES (?)", (name,))
+        return self._store.execute(
+            "INSERT INTO sheets(name, sort) VALUES (?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM sheets))", (name,))
 
     @need_unlock
     def rename_sheet(self, sheet_id, name):
@@ -322,11 +323,20 @@ class Api:
     @need_unlock
     def add_group(self, name, color="#4f7cff"):
         name = (name or "").strip() or "新分組"
-        return self._store.execute("INSERT INTO groups(name, color) VALUES (?, ?)", (name, color))
+        return self._store.execute(
+            "INSERT INTO groups(name, color, sort) VALUES (?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM groups))", (name, color))
 
     @need_unlock
     def update_group(self, group_id, name, color):
         self._store.execute("UPDATE groups SET name=?, color=? WHERE id=?", (name.strip(), color, group_id))
+
+    @need_unlock
+    def reorder(self, kind, ids):
+        """按給出的 id 順序排列分組（kind="groups"）或列表（kind="sheets"），沒給出的排在後面。"""
+        table = {"groups": "groups", "sheets": "sheets"}[kind]
+        ids = [int(i) for i in ids or []]
+        rest = [r["id"] for r in self._store.query(f"SELECT id FROM {table} ORDER BY sort, id") if r["id"] not in ids]
+        self._store.executemany(f"UPDATE {table} SET sort=? WHERE id=?", [(i, gid) for i, gid in enumerate(ids + rest)])
 
     @need_unlock
     def delete_group(self, group_id):

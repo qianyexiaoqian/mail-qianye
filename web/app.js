@@ -158,7 +158,7 @@ const app = createApp({
       edit: null, editCode: '', imp: null, groupEdit: null, colEdit: null, dialog: null, settings: null,
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
-      selfDomains: [], recType: '', recBusy: false,
+      selfDomains: [], recType: '', recBusy: false, sideDrag: null, sideOver: '',
       lock: { has_password: false, unlocked: false },
       lockForm: { pw: '', pw2: '', err: '', busy: false },
       systemDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
@@ -726,18 +726,53 @@ const app = createApp({
       if (g.id) this._removedGroups.push(g.id);
       this.groupEdit.splice(this.groupEdit.indexOf(g), 1);
     },
+    moveGroupEdit(i, d) {
+      const list = this.groupEdit;
+      [list[i], list[i + d]] = [list[i + d], list[i]];
+    },
     async saveGroups() {
       for (const id of this._removedGroups) await call('delete_group', id);
+      const order = [];
       for (const g of this.groupEdit) {
         if (!g.name.trim()) continue;
         if (g.id) await call('update_group', g.id, g.name, g.color);
-        else await call('add_group', g.name, g.color);
+        else g.id = await call('add_group', g.name, g.color);
+        order.push(g.id);
       }
+      await call('reorder', 'groups', order);
       if (this._removedGroups.includes(this.filters.group)) this.filters.group = '';
       this.groupEdit = null;
       await this.refreshState();
       await this.loadAccounts();
       this.toast(t('group.saved'));
+    },
+
+    // ---------- 側邊欄拖動排序（列表 / 分組） ----------
+    onSideDragStart(kind, id, e) {
+      this.sideDrag = { kind, id };
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(id));
+    },
+    onSideDragOver(kind, id, e) {
+      if (this.sideDrag?.kind !== kind) return;
+      e.preventDefault();
+      this.sideOver = this.sideDrag.id === id ? '' : kind + id;
+    },
+    onSideDragEnd() { this.sideDrag = null; this.sideOver = ''; },
+    async onSideDrop(kind, id) {
+      const drag = this.sideDrag;
+      this.onSideDragEnd();
+      if (!drag || drag.kind !== kind || drag.id === id) return;
+      await this.moveInOrder(kind, drag.id, id);
+    },
+    // 把 fromId 移到 toId 的位置（往下拖放在它後面，往上拖放在它前面）
+    async moveInOrder(kind, fromId, toId) {
+      const ids = (kind === 'groups' ? this.groups : this.sheets).map(x => x.id);
+      const down = ids.indexOf(fromId) < ids.indexOf(toId);
+      const rest = ids.filter(x => x !== fromId);
+      rest.splice(rest.indexOf(toId) + (down ? 1 : 0), 0, fromId);
+      await call('reorder', kind, rest);
+      await this.refreshState();
     },
 
     // ---------- 列設置 / 列順序 / 列寬 ----------
