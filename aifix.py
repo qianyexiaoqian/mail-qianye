@@ -1,4 +1,5 @@
-"""AI 糾錯：調用 OpenAI 兼容協議的 /chat/completions（流式），整理批量導入時無法識別的行。"""
+"""調用 OpenAI 兼容協議的 /chat/completions（流式，支持工具調用）。
+用於：批量導入時 AI 糾錯無法識別的行；AI 助手對話。"""
 import json
 import urllib.error
 import urllib.request
@@ -35,12 +36,14 @@ def endpoint(base_url):
     return url + "/chat/completions"
 
 
-def _open(cfg, messages, stream, max_tokens=None):
+def _open(cfg, messages, stream, max_tokens=None, tools=None):
     if not (cfg.get("model") or "").strip():
         raise ValueError("err.ai_no_model")
     body = {"model": cfg["model"].strip(), "messages": messages, "stream": stream, "temperature": 0}
     if max_tokens:
         body["max_tokens"] = max_tokens
+    if tools:
+        body["tools"] = tools
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json"}
     if cfg.get("api_key"):
         headers["Authorization"] = "Bearer " + cfg["api_key"].strip()
@@ -76,25 +79,40 @@ def _message_text(data):
     return msg.get("content") or ""
 
 
-def stream_chat(cfg, messages, on_delta, should_stop=lambda: False):
-    """流式請求，每收到一段文本調用 on_delta(text)。服務不支持流式時退回一次性返回。"""
-    resp = _open(cfg, messages, True)
+def _merge_tool_calls(calls, deltas):
+    """流式返回的 tool_calls 是按 index 分段的，拼成完整的調用。"""
+    for d in deltas or []:
+        i = d.get("index", len(calls))
+        call = calls.setdefault(i, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        if d.get("id"):
+            call["id"] = d["id"]
+        fn = d.get("function") or {}
+        call["function"]["name"] += fn.get("name") or ""
+        call["function"]["arguments"] += fn.get("arguments") or ""
+
+
+def stream_chat(cfg, messages, on_delta, should_stop=lambda: False, tools=None):
+    """流式請求，每收到一段文本調用 on_delta(text)，返回模型要調用的工具列表。
+    服務不支持流式時退回一次性返回。"""
+    resp = _open(cfg, messages, True, tools=tools)
+    calls = {}
     with resp:
         if "event-stream" not in (resp.headers.get("Content-Type") or ""):
             data = json.loads(resp.read().decode("utf-8", "replace"))
             if data.get("error"):
                 raise RuntimeError("err.ai_http|" + _error_detail(json.dumps(data)))
             on_delta(_message_text(data))
-            return
+            msg = ((data.get("choices") or [{}])[0].get("message") or {})
+            return msg.get("tool_calls") or []
         for raw in resp:
             if should_stop():
-                return
+                break
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
             payload = line[5:].strip()
             if payload == "[DONE]":
-                return
+                break
             try:
                 chunk = json.loads(payload)
             except ValueError:
@@ -102,9 +120,14 @@ def stream_chat(cfg, messages, on_delta, should_stop=lambda: False):
             if chunk.get("error"):
                 raise RuntimeError("err.ai_http|" + _error_detail(payload))
             for choice in chunk.get("choices") or []:
-                piece = (choice.get("delta") or {}).get("content")
-                if piece:
-                    on_delta(piece)
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    on_delta(delta["content"])
+                _merge_tool_calls(calls, delta.get("tool_calls"))
+    result = [calls[i] for i in sorted(calls)]
+    for i, c in enumerate(result):
+        c["id"] = c["id"] or f"call_{i}"
+    return result
 
 
 def test(cfg):

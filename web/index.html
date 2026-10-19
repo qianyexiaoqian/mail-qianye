@@ -9,6 +9,7 @@
 <script src="i18n.js"></script>
 <script src="countries.js"></script>
 <script src="importer.js"></script>
+<script src="agent.js"></script>
 </head>
 <body>
 <div id="app" v-cloak>
@@ -100,6 +101,7 @@
         </div>
       </div>
       <button class="btn" @click="openColumns">{{ t('btn.columns') }}</button>
+      <button class="btn" :class="{primary: agent.open}" @click="toggleAgent">🤖 {{ t('agent.title') }}</button>
     </header>
 
     <div class="filters">
@@ -156,6 +158,10 @@
         <option value="">{{ t('bulk.setColumn') }}</option>
         <option v-for="c in currentSheet.columns" :value="c.id">{{ c.name }}</option>
       </select>
+      <select v-if="selfDomains.length" @change="bulkCreateRecovery($event)" :title="t('selfmail.bulkTip')">
+        <option value="">{{ t('selfmail.bulk') }}</option>
+        <option v-for="d in selfDomains" :key="d" :value="d">@{{ d }}</option>
+      </select>
       <button class="btn sm" @click="copySelected">{{ t('bulk.copy') }}</button>
       <button class="btn sm danger" @click="bulkDelete">{{ t('btn.delete') }}</button>
       <button class="link" @click="selected = {}">{{ t('bulk.unselect') }}</button>
@@ -182,10 +188,13 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="a in paged" :key="a.id" :class="{selected: selected[a.id]}" @dblclick="openEdit(a)">
+          <tr v-for="(a, ri) in paged" :key="a.id" :class="{selected: selected[a.id]}" @dblclick="openEdit(a)">
             <td class="col-check"><input type="checkbox" v-model="selected[a.id]"></td>
             <td v-for="c in visibleColumns" :key="c.key" :class="['col-' + c.key, c.custom && 'type-' + c.col.type]">
-              <template v-if="c.key === 'email'">
+              <template v-if="c.key === 'index'">
+                <span class="muted row-index">{{ (page - 1) * pageSize + ri + 1 }}</span>
+              </template>
+              <template v-else-if="c.key === 'email'">
                 <span class="copy mono" :title="a.email" @click="copy(a.email, t('copy.email'))">{{ a.email }}</span>
                 <button v-if="mailEligible(a, 'email')" class="icon-btn sm inbox-btn" :title="t('mail.open')" @click="openInbox(a, 'email')">📥</button>
               </template>
@@ -245,6 +254,50 @@
       <input class="goto" type="number" min="1" :max="pageCount" :value="page" @change="gotoPage($event)">
     </footer>
   </main>
+
+  <!-- ========== AI 助手 ========== -->
+  <aside v-if="agent.open" class="agent-panel">
+    <div class="agent-head">
+      <b>🤖 {{ t('agent.title') }}</b>
+      <span class="spacer"></span>
+      <label class="check" :title="t('agent.autoTip')"><input type="checkbox" v-model="prefs.agentAuto"> {{ t('agent.auto') }}</label>
+      <button class="icon-btn" :title="t('agent.clear')" @click="agentClear">⟲</button>
+      <button class="icon-btn" @click="agent.open = false">✕</button>
+    </div>
+    <div class="agent-msgs" ref="agentMsgs">
+      <div v-if="!agent.items.length" class="agent-empty">
+        <p class="muted">{{ t('agent.hello') }}</p>
+        <button v-for="ex in agentExamples" :key="ex" class="agent-example" @click="agentSend(ex)">{{ ex }}</button>
+        <p class="muted agent-privacy">{{ t('agent.privacy') }}</p>
+      </div>
+      <div v-for="(m, i) in agent.items" :key="i" class="agent-msg" :class="m.role">
+        <div v-if="m.text" class="bubble">{{ m.text }}</div>
+        <div v-for="(tc, j) in m.tools" :key="j" class="agent-tool" :class="tc.status">
+          <div class="agent-tool-row">
+            <span v-if="tc.status === 'running'" class="spinner"></span>
+            <span v-else>{{ tc.status === 'error' ? '⚠' : tc.status === 'confirm' ? '❓' : '✓' }}</span>
+            <span>{{ agentToolLabel(tc.name) }}</span>
+            <span class="muted ellipsis" :title="tc.summary">{{ tc.summary }}</span>
+          </div>
+          <div v-if="tc.status === 'confirm'" class="agent-confirm">
+            <div class="agent-desc">{{ tc.desc }}</div>
+            <div class="editor-row">
+              <button class="btn sm primary" @click="tc.resolve(true)">{{ t('agent.run') }}</button>
+              <button class="btn sm" @click="tc.resolve(false)">{{ t('btn.cancel') }}</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="m.error" class="inbox-error">{{ m.error }}</div>
+        <span v-if="m.streaming && !m.text && !m.tools.length" class="spinner"></span>
+      </div>
+    </div>
+    <div class="agent-input">
+      <textarea ref="agentInput" v-model="agent.input" rows="3" :placeholder="t('agent.placeholder')"
+                @keydown.enter.exact.prevent="agentSend()"></textarea>
+      <button v-if="agent.busy" class="btn" @click="agentStop">⏹ {{ t('import.aiStop') }}</button>
+      <button v-else class="btn primary" :disabled="!agent.input.trim()" @click="agentSend()">{{ t('agent.send') }}</button>
+    </div>
+  </aside>
 
   <!-- ========== 單元格浮層編輯 ========== -->
   <div v-if="pop" ref="popEl" class="popover" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
@@ -330,7 +383,16 @@
           <div class="input-row"><input v-model="edit.totp_secret" class="mono" :placeholder="t('edit.totpPlaceholder')">
             <span v-if="editCode" class="code sm">{{ fmtCode(editCode) }}</span></div>
         </label>
-        <label>{{ t('col.recovery_email') }}<input v-model="edit.recovery_email" class="mono"></label>
+        <label>{{ t('col.recovery_email') }}
+          <div class="input-row">
+            <select v-if="selfDomains.length" v-model="recType" class="rec-type" :disabled="recBusy" :title="t('selfmail.typeTip')" @change="onRecType">
+              <option value="">{{ t('selfmail.manual') }}</option>
+              <option v-for="d in selfDomains" :key="d" :value="d">{{ t('selfmail.option', {domain: d}) }}</option>
+            </select>
+            <input v-model="edit.recovery_email" class="mono" :placeholder="recBusy ? t('selfmail.creating') : ''">
+          </div>
+          <span v-if="selfDomains.length && edit.email && !recType" class="muted rec-hint">{{ t('selfmail.preview', {user: edit.email.split('@')[0]}) }}</span>
+        </label>
         <label>{{ t('col.recovery_password') }}<input v-model="edit.recovery_password" class="mono"></label>
         <label>{{ t('col.oauth_client_id') }} <span class="muted">{{ t('edit.oauthHint') }}</span><input v-model="edit.oauth_client_id" class="mono" placeholder="client id"></label>
         <label>{{ t('col.oauth_token') }}<input v-model="edit.oauth_token" class="mono" placeholder="refresh token"></label>
@@ -426,22 +488,23 @@
         <div class="editor-row">
           <button class="link warn-text" @click="imp.showFailed = !imp.showFailed">{{ imp.showFailed ? '▾' : '▸' }} {{ t('import.failed', {n: impParsed.failed.length}) }}</button>
           <span class="spacer"></span>
-          <button v-if="imp.ai && imp.ai.running" class="btn sm" @click="stopAiFix">⏹ {{ t('import.aiStop') }}</button>
-          <button v-else class="btn sm primary" @click="startAiFix">🤖 {{ imp.ai ? t('import.aiRetry') : t('import.aiFix') }}</button>
+          <button v-if="imp.ai.running" class="btn sm" @click="stopAiFix">⏹ {{ t('import.aiStop') }}</button>
+          <button v-else class="btn sm" :class="{primary: !impAiRows.length}" @click="runAiFix(true)">🤖 {{ impAiRows.length ? t('import.aiRetry') : t('import.aiFix') }}</button>
         </div>
+        <div v-if="!imp.ai.ready" class="muted import-hint">{{ t('import.aiAutoHint') }}</div>
         <div v-if="imp.showFailed" class="failed-list">
           <div v-for="f in impParsed.failed.slice(0, 200)" :key="f.n" class="failed-item">
             <span class="muted">#{{ f.n }}</span><span class="mono ellipsis" :title="f.raw">{{ f.raw }}</span>
             <span class="warn-text ellipsis" :title="importReason(f)">{{ importReason(f) }}</span>
           </div>
         </div>
-        <label v-if="impParsed.failed.some(f => f.row)" class="check muted"><input type="checkbox" v-model="imp.keepPartial"> {{ t('import.keepPartial') }}</label>
+        <label v-if="impParsed.failed.some(f => f.row && !imp.ai.results[f.raw])" class="check muted"><input type="checkbox" v-model="imp.keepPartial"> {{ t('import.keepPartial') }}</label>
         <div class="muted import-hint">{{ t('import.aiPrivacy') }}</div>
 
-        <div v-if="imp.ai" class="ai-box">
+        <div v-if="imp.ai.running || impAiRows.length || imp.ai.error || imp.ai.text" class="ai-box">
           <div class="editor-row">
             <span v-if="imp.ai.running" class="spinner"></span>
-            <b>{{ imp.ai.running ? t('import.aiRunning', {n: impAiRows.length, m: imp.ai.lines.length}) : t('import.aiResult') }}</b>
+            <b>{{ imp.ai.running ? t('import.aiRunning', {n: imp.ai.got, m: imp.ai.total}) : t('import.aiResult') }}</b>
             <span class="spacer"></span>
             <template v-if="impAiRows.length">
               <button class="link" @click="setAllAi(true)">{{ t('import.aiAll') }}</button>
@@ -474,7 +537,7 @@
       <div class="modal-foot">
         <span class="spacer"></span>
         <button class="btn" @click="closeImport">{{ t('btn.cancel') }}</button>
-        <button class="btn primary" :disabled="!impRows.length || (imp.ai && imp.ai.running)" @click="doImport">
+        <button class="btn primary" :disabled="!impRows.length || imp.ai.running" @click="doImport">
           {{ impAiChecked.length ? t('import.submitAi', {n: impRows.length, m: impAiChecked.length}) : t('import.submit', {n: impRows.length}) }}
         </button>
       </div>

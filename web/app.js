@@ -31,6 +31,31 @@ function errText(e) {
   return t(key) + (rest.length ? `（${rest.join('|')}）` : '');
 }
 
+// ---------- AI（OpenAI 兼容接口，請求在後台線程流式進行） ----------
+// 配置齊全：有地址、模型和 Key；本地模型（Ollama 等）可以不填 Key
+function aiConfigured(cfg) {
+  if (!cfg || !cfg.base_url || !cfg.model) return false;
+  return !!cfg.has_api_key || /\/\/(localhost|127\.0\.0\.1)[:/]/.test(cfg.base_url);
+}
+// 輪詢後台 AI 任務直到結束：onDelta(新文本)，shouldStop() 為真時停止。返回 { tool_calls, stopped }，出錯拋異常
+async function pollAiJob(job, onDelta, shouldStop = () => false) {
+  let offset = 0;
+  for (;;) {
+    if (shouldStop()) {
+      call('ai_fix_stop', job).catch(() => {});
+      return { tool_calls: [], stopped: true };
+    }
+    const r = await call('ai_fix_poll', job, offset);
+    offset = r.offset;
+    if (r.delta) onDelta(r.delta);
+    if (r.done) {
+      if (r.error) throw new Error(r.error);
+      return { tool_calls: r.tool_calls || [], stopped: false };
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+}
+
 // 國家數據、countryName / flag / searchCountries / resolveCountries 在 countries.js
 
 const COLOR_MARKS = ['#e5484d', '#f76b15', '#f5a524', '#30a46c', '#12a594', '#0ea5e9', '#4f7cff', '#8e4ec6', '#e93d82', '#8b5e3c', '#64748b', '#1f2937'];
@@ -70,14 +95,14 @@ function fileToThumb(file, max = 128) {
 }
 
 const BASE_COLUMNS = [
-  { key: 'email', sort: true }, { key: 'password' }, { key: 'totp' }, { key: 'recovery_email', sort: true },
+  { key: 'index' }, { key: 'email', sort: true }, { key: 'password' }, { key: 'totp' }, { key: 'recovery_email', sort: true },
   { key: 'recovery_password' }, { key: 'phone', sort: true }, { key: 'group', sort: true }, { key: 'status', sort: true },
   { key: 'notes', sort: true }, { key: 'updated', sort: true },
 ];
-const DEFAULT_VISIBLE = { email: true, password: true, totp: true, recovery_email: true, recovery_password: false,
+const DEFAULT_VISIBLE = { index: true, email: true, password: true, totp: true, recovery_email: true, recovery_password: false,
   phone: false, group: true, status: true, notes: true, updated: false };
 // 默認列寬（px），拖動表頭右邊緣可調整，記在 prefs.colWidths
-const DEFAULT_WIDTHS = { email: 250, password: 140, totp: 110, recovery_email: 230, recovery_password: 140, phone: 140,
+const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, recovery_email: 230, recovery_password: 140, phone: 140,
   group: 100, status: 80, notes: 240, updated: 140 };
 const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, image: 70 };
 const MIN_COL_WIDTH = 50;
@@ -86,7 +111,7 @@ const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize:
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
   colOrders: {}, colWidths: {},  // 列順序按列表分別記（自定義列每個列表不同），_default 是最近一次調整的順序
   importMode: 'smart', importOrder: ['email', 'password', 'totp_secret', 'recovery_email', 'skip', 'skip'],
-  mailAuto: true, mailAutoCopy: false };
+  mailAuto: true, mailAutoCopy: false, agentAuto: false };
 // 常用的 OpenAI 兼容服務，設置裡一鍵填入
 const AI_PRESETS = [
   { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
@@ -113,6 +138,7 @@ function orderColumns(cols, order) {
 const normalize = s => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 const app = createApp({
+  mixins: [AgentMixin],  // AI 助手，見 agent.js
   data() {
     return {
       ready: false,
@@ -130,6 +156,7 @@ const app = createApp({
       edit: null, editCode: '', imp: null, groupEdit: null, colEdit: null, dialog: null, settings: null,
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
+      selfDomains: [], recType: '', recBusy: false,
       lock: { has_password: false, unlocked: false },
       lockForm: { pw: '', pw2: '', err: '', busy: false },
       systemDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
@@ -156,10 +183,11 @@ const app = createApp({
       return i ? parseImport(i.text, i.sep, i.mode, i.order) : { rows: [], failed: [] };
     },
     // 當前仍然是「無法識別」的原始行，AI 結果只對這些行生效（文本改了就自動作廢）
-    impFailedRaw() { return new Set(this.impParsed.failed.map(f => f.raw)); },
+    impFailedKey() { return this.impParsed.failed.map(f => f.raw).join('\n'); },
+    // 當前仍然無法識別的行裡，AI 已經給出結果的（文本改了，不再出現的行自動作廢）
     impAiRows() {
       const ai = this.imp?.ai;
-      return ai ? ai.rows.filter(r => this.impFailedRaw.has(r.raw)) : [];
+      return ai ? this.impParsed.failed.map(f => ai.results[f.raw]).filter(Boolean) : [];
     },
     impAiChecked() { return this.impAiRows.filter(r => r.checked && this.validEmail(r.row.email)); },
     // 最終要導入的行：識別成功的 + 勾選的 AI 糾錯結果 + （可選）原樣導入有郵箱的失敗行
@@ -228,9 +256,7 @@ const app = createApp({
 
     filtered() {
       const f = this.filters;
-      const tokens = this.search.toLowerCase().split(/[\s,;，；]+/).filter(Boolean).map(raw => ({ raw, norm: normalize(raw) }));
-      // 全部是郵箱 → 批量查找（任意一個匹配）；否則所有關鍵詞都要匹配
-      const bulk = tokens.length > 1 && tokens.every(tk => tk.raw.includes('@'));
+      const match = this.searchMatcher(this.search);
       const countryOn = this.countryColumns.length && f.country.trim();
       const countrySet = new Set(this.countryFilterCodes);
       return this.accounts.filter(a => {
@@ -240,30 +266,11 @@ const app = createApp({
         if (f.domain && domainOf(a.email) !== f.domain) return false;
         if (f.twofa && (f.twofa === 'yes') !== !!a.totp_secret) return false;
         if (f.recovery && (f.recovery === 'yes') !== !!a.recovery_email) return false;
-        if (!tokens.length) return true;
-        const fields = this.searchFields(a);
-        const hay = fields.join('\n').toLowerCase();
-        const normHay = fields.map(normalize).join('\n');
-        const hit = tk => hay.includes(tk.raw) || (tk.norm && normHay.includes(tk.norm));
-        return bulk ? tokens.some(hit) : tokens.every(hit);
+        return match(a);
       });
     },
 
-    sorted() {
-      const { key, dir } = this.sort;
-      if (!key) return this.filtered;
-      const val = a => {
-        if (key === 'group') return this.groupMap[a.group_id]?.name || '';
-        if (key === 'updated') return a.updated_at;
-        if (key === 'status') return this.statusIndex(a.status);
-        if (key.startsWith('x_')) return String(a.extra[key.slice(2)] || '').toLowerCase();
-        return (a[key] || '').toLowerCase();
-      };
-      return [...this.filtered].sort((x, y) => {
-        const a = val(x), b = val(y);
-        return (a < b ? -1 : a > b ? 1 : 0) * dir;
-      });
-    },
+    sorted() { return this.sortList(this.filtered); },
 
     pageCount() { return Math.max(1, Math.ceil(this.sorted.length / this.pageSize)); },
     paged() { return this.sorted.slice((this.page - 1) * this.pageSize, this.page * this.pageSize); },
@@ -303,6 +310,7 @@ const app = createApp({
     pageCount(v) { if (this.page > v) this.page = v; },
     sheetId(v) { this.prefs.sheetId = v; },
     'edit.totp_secret'(v) { this.refreshEditCode(v); },
+    impFailedKey(v) { if (v && this.imp?.ai.ready) this.scheduleAutoAi(); },
     'prefs.lang': { immediate: true, handler(v) {
       ui.lang = v;
       document.documentElement.lang = v;
@@ -385,6 +393,8 @@ const app = createApp({
     async lockNow() {
       this._restore = { page: this.page, scroll: this.$refs.tableWrap?.scrollTop || 0 };
       this.closeInbox();
+      this.agentClear();  // 對話裡有郵箱數據
+      this.agent.open = false;
       await call('lock');
       // 清掉內存裡的明文
       Object.assign(this, { accounts: [], codes: {}, selected: {}, revealed: {}, edit: null, editCode: '', imp: null,
@@ -449,6 +459,7 @@ const app = createApp({
       if (s.mail) {
         await call('set_mail_config', this.mailConfigPayload());
         this.mailCfg = await call('get_mail_config');
+        this.loadSelfDomains();
       }
       if (s.ai) await call('set_ai_config', this.aiConfigPayload());
       if (s.old || s.pw || s.pw2) {
@@ -460,6 +471,52 @@ const app = createApp({
         this.toast(t('settings.pwChanged'));
       }
       this.settings = null;
+    },
+
+    // ---------- 自動創建自建郵箱（BillionMail 管理員模式） ----------
+    loadSelfDomains() {
+      if (!this.mailCfg?.admin_enabled || !this.mailCfg?.panel_url) { this.selfDomains = []; return; }
+      call('selfmail_domains').then(r => { this.selfDomains = r.admin ? r.domains : []; }).catch(() => { this.selfDomains = []; });
+    },
+    // 編輯窗口：輔助郵箱類型選「自建 @域名」→ 用主郵箱的用戶名創建郵箱，隨機密碼，自動填入
+    async onRecType() {
+      const domain = this.recType;
+      const edit = this.edit;
+      if (!domain || !edit) return;
+      if (!this.validEmail(edit.email)) {
+        this.recType = '';
+        return this.toast(t('selfmail.needEmail'), 'error');
+      }
+      this.recBusy = true;
+      try {
+        const r = await call('create_self_mailbox', edit.email.trim(), domain);
+        edit.recovery_email = r.address;
+        edit.recovery_password = r.password;
+        // 已有的賬號立即保存，避免取消編輯後郵箱已建好但密碼沒記下
+        if (edit.id) {
+          await call('update_fields', [{ id: edit.id, fields: { recovery_email: r.address, recovery_password: r.password } }]);
+          await this.loadAccounts();
+        }
+        this.toast(t('selfmail.created', { address: r.address }));
+      } catch (e) {
+        this.recType = '';
+        this.toast(errText(e), 'error');
+      }
+      this.recBusy = false;
+    },
+    async bulkCreateRecovery(e) {
+      const domain = e.target.value;
+      e.target.value = '';
+      if (!domain) return;
+      const ids = this.selectedIds;
+      const ok = await this.confirm(t('selfmail.bulkTitle'), t('selfmail.bulkConfirm', { n: ids.length, domain }), t('btn.ok'), false);
+      if (!ok) return;
+      this.toast(t('selfmail.creating'));
+      try {
+        const r = await call('create_recovery_mailboxes', ids, domain);
+        await this.loadAccounts();
+        this.toast(t('selfmail.bulkDone', { n: r.created.length, s: r.skipped, f: r.failed.length }), r.failed.length ? 'error' : 'ok');
+      } catch (err) { this.toast(errText(err), 'error'); }
     },
 
     // ---------- 郵箱收件箱（自建 BillionMail / 微軟 Outlook） ----------
@@ -538,7 +595,7 @@ const app = createApp({
 
     // ---------- 數據加載 ----------
     async reload() {
-      call('get_mail_config').then(c => { this.mailCfg = c; }).catch(() => {});
+      call('get_mail_config').then(c => { this.mailCfg = c; this.loadSelfDomains(); }).catch(() => {});
       const st = await call('get_state');
       this.sheets = st.sheets;
       this.groups = st.groups;
@@ -576,6 +633,35 @@ const app = createApp({
         const r = await call('totp_codes', [secret]);
         this.editCode = r[secret] || '';
       }, 250);
+    },
+    // 搜索框的匹配規則：忽略符號；全部是郵箱 → 批量查找（任意一個匹配）；否則所有關鍵詞都要匹配
+    searchMatcher(search) {
+      const tokens = (search || '').toLowerCase().split(/[\s,;，；]+/).filter(Boolean).map(raw => ({ raw, norm: normalize(raw) }));
+      if (!tokens.length) return () => true;
+      const bulk = tokens.length > 1 && tokens.every(tk => tk.raw.includes('@'));
+      return a => {
+        const fields = this.searchFields(a);
+        const hay = fields.join('\n').toLowerCase();
+        const normHay = fields.map(normalize).join('\n');
+        const hit = tk => hay.includes(tk.raw) || (tk.norm && normHay.includes(tk.norm));
+        return bulk ? tokens.some(hit) : tokens.every(hit);
+      };
+    },
+    // 按表頭當前的排序規則排序
+    sortList(list) {
+      const { key, dir } = this.sort;
+      if (!key) return list;
+      const val = a => {
+        if (key === 'group') return this.groupMap[a.group_id]?.name || '';
+        if (key === 'updated') return a.updated_at;
+        if (key === 'status') return this.statusIndex(a.status);
+        if (key.startsWith('x_')) return String(a.extra[key.slice(2)] || '').toLowerCase();
+        return (a[key] || '').toLowerCase();
+      };
+      return [...list].sort((x, y) => {
+        const a = val(x), b = val(y);
+        return (a < b ? -1 : a > b ? 1 : 0) * dir;
+      });
     },
     searchFields(a) {
       const out = [a.email, a.recovery_email, a.phone, a.notes, this.groupMap[a.group_id]?.name || '', this.statusLabel(a.status)];
@@ -781,6 +867,7 @@ const app = createApp({
     // ---------- 新增 / 編輯 ----------
     openEdit(a, focus) {
       this.pop = null;
+      this.recType = '';
       this.edit = a
         ? { ...a, extra: { ...a.extra } }
         : { sheet_id: this.sheetId, email: '', password: '', totp_secret: '', recovery_email: '', recovery_password: '',
@@ -851,12 +938,17 @@ const app = createApp({
     },
 
     // ---------- 導入 / 導出 ----------
-    openImport() {
+    async openImport() {
       const order = [...this.prefs.importOrder];
       while (order.length < 6) order.push('skip');
       this.imp = { text: '', sep: 'auto', mode: this.prefs.importMode === 'manual' ? 'manual' : 'smart', order,
         group_id: typeof this.filters.group === 'number' ? this.filters.group : null, status: this.meta.statuses[0], skipDup: true,
-        extra: {}, keepPartial: false, showFailed: true, ai: null };
+        extra: {}, keepPartial: false, showFailed: false,
+        // AI 糾錯：results 按原始行緩存結果（改了文本也不用重新請求），tried 記錄已經發給 AI 的行
+        ai: { ready: false, results: {}, tried: {}, running: false, stop: false, error: '', text: '', showRaw: false, total: 0, got: 0 } };
+      const imp = this.imp;
+      try { imp.ai.ready = aiConfigured(await call('get_ai_config')); } catch { /* 未配置 */ }
+      if (imp.ai.ready) this.scheduleAutoAi();
     },
     closeImport() {
       this.stopAiFix();
@@ -871,65 +963,54 @@ const app = createApp({
     importReason(f) { return t(f.reason[0], f.reason[1]); },
     validEmail(s) { return EMAIL_RE.test((s || '').trim()); },
 
-    // ---------- AI 糾錯：把無法識別的行發給 AI，流式顯示結果，人工核對後一併導入 ----------
-    async startAiFix() {
+    // ---------- AI 糾錯：配置了 AI 時，無法識別的行自動交給 AI，流式顯示結果，人工核對後一併導入 ----------
+    scheduleAutoAi() {
+      clearTimeout(this._aiAutoTimer);
+      this._aiAutoTimer = setTimeout(() => this.runAiFix(false), 900);  // 等粘貼/輸入停下來
+    },
+    async runAiFix(manual) {
       const imp = this.imp;
-      const cfg = await call('get_ai_config');
-      const local = /\/\/(localhost|127\.0\.0\.1)[:/]/.test(cfg.base_url);  // 本地模型（Ollama 等）可以不填 Key
-      if (!cfg.base_url || !cfg.model || (!cfg.has_api_key && !local)) return this.toast(t('import.aiNoConfig'), 'error');
-      const failed = this.impParsed.failed;
-      if (!failed.length) return;
-      this.stopAiFix();
-      const lines = failed.map(f => f.raw);
-      imp.ai = { running: true, error: '', text: '', offset: 0, lines, rows: [], parsed: 0, job: null, showRaw: false };
-      const ai = imp.ai;  // 取響應式代理，後面的修改才會刷新界面
-      try {
-        ai.job = await call('ai_fix_start', lines);
-      } catch (e) {
-        ai.running = false;
-        ai.error = errText(e);
+      if (!imp) return;
+      const ai = imp.ai;
+      if (!ai.ready) {
+        if (manual) this.toast(t('import.aiNoConfig'), 'error');
         return;
       }
-      const poll = async () => {
-        if (this.imp !== imp || imp.ai !== ai || !ai.running) return;
-        try {
-          const r = await call('ai_fix_poll', ai.job, ai.offset);
-          ai.text += r.delta;
-          ai.offset = r.offset;
-          this.mergeAiRows(ai);
-          if (r.error) ai.error = errText(new Error(r.error));
-          if (r.done) {
-            ai.running = false;
-            if (!ai.error && !ai.rows.length) ai.error = t('import.aiEmpty');
-            return;
+      if (ai.running) return;
+      if (manual) for (const f of this.impParsed.failed) { delete ai.results[f.raw]; delete ai.tried[f.raw]; }
+      // 每次最多發 100 行，剩下的這一批完成後接著發
+      const lines = this.impParsed.failed.map(f => f.raw).filter(raw => !ai.tried[raw]).slice(0, 100);
+      if (!lines.length) return;
+      for (const raw of lines) ai.tried[raw] = true;
+      Object.assign(ai, { running: true, stop: false, error: '', text: '', total: lines.length, got: 0 });
+      let parsed = 0;
+      try {
+        const job = await call('ai_fix_start', lines);
+        await pollAiJob(job, delta => {
+          ai.text += delta;
+          for (const obj of parseAiLines(ai.text).slice(parsed)) {
+            parsed++;
+            const raw = lines[(parseInt(obj.line, 10) || 0) - 1];
+            if (raw === undefined) continue;
+            const row = aiRowToImport(obj);
+            const ok = obj.ok !== false && EMAIL_RE.test(row.email || '');
+            ai.results[raw] = { raw, row, ok, reason: obj.reason || '', checked: ok };
+            ai.got++;
           }
-        } catch (e) {
-          ai.running = false;
-          ai.error = errText(e);
-          return;
-        }
-        ai.timer = setTimeout(poll, 250);
-      };
-      poll();
-    },
-    // 把新解析出的 JSON 行合併進結果表（已經在表裡的行保留用戶的修改）
-    mergeAiRows(ai) {
-      const objs = parseAiLines(ai.text);
-      for (const obj of objs.slice(ai.parsed)) {
-        ai.parsed++;
-        const raw = ai.lines[(parseInt(obj.line, 10) || 0) - 1];
-        if (raw === undefined || ai.rows.some(r => r.raw === raw)) continue;
-        const row = aiRowToImport(obj);
-        const ok = obj.ok !== false && EMAIL_RE.test(row.email || '');
-        ai.rows.push({ raw, row, ok, reason: obj.reason || '', checked: ok });
+        }, () => this.imp !== imp || ai.stop);
+      } catch (e) {
+        ai.error = errText(e);
       }
+      const stopped = ai.stop;
+      ai.running = false;
+      ai.stop = false;
+      if (!ai.error && !parsed && !stopped) ai.error = t('import.aiEmpty');
+      // 這一批完成後還有新出現的無法識別行（用戶又粘貼了內容）就繼續
+      if (this.imp === imp && !ai.error && !stopped) this.runAiFix(false);
     },
     stopAiFix() {
       const ai = this.imp?.ai;
-      if (!ai) return;
-      clearTimeout(ai.timer);
-      if (ai.running && ai.job) call('ai_fix_stop', ai.job).catch(() => {});
-      ai.running = false;
+      if (ai?.running) ai.stop = true;
     },
     setAllAi(checked) { for (const r of this.impAiRows) r.checked = checked; },
 
@@ -975,10 +1056,10 @@ const app = createApp({
         ...cols.map(c => a.extra[c.id] || '')]);
       return '﻿' + [head, ...lines].map(r => r.map(esc).join(',')).join('\r\n');  // BOM 讓 Excel 正確識別 UTF-8
     },
-    async doExport(fmt) {
+    async doExport(fmt, only = null) {
       this.exportMenu = false;
       const set = new Set(this.selectedIds);
-      const rows = set.size ? this.sorted.filter(a => set.has(a.id)) : this.sorted;
+      const rows = only || (set.size ? this.sorted.filter(a => set.has(a.id)) : this.sorted);
       const d = new Date(), p = n => String(n).padStart(2, '0');
       const name = `mail_export_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${fmt}`;
       const content = this.buildExport(rows, fmt);
@@ -1027,9 +1108,9 @@ const app = createApp({
         nextTick(() => { this.$refs.dialogInput?.focus(); this.$refs.dialogInput?.select(); });
       });
     },
-    confirm(title, message) {
+    confirm(title, message, ok = t('btn.delete'), danger = true) {
       return new Promise(resolve => {
-        this.dialog = { title, message, danger: true, ok: t('btn.delete'), resolve: v => { this.dialog = null; resolve(!!v); } };
+        this.dialog = { title, message, danger, ok, resolve: v => { this.dialog = null; resolve(!!v); } };
       });
     },
     toast(text, type = 'ok') {

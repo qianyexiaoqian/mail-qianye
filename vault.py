@@ -5,6 +5,8 @@
 """
 import base64
 import os
+import secrets
+import string
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -21,6 +23,16 @@ class WrongPassword(Exception):
 
 def new_salt():
     return base64.b64encode(os.urandom(16)).decode()
+
+
+def random_password(length=14):
+    """隨機密碼：大小寫字母 + 數字各至少一個（不用符號，避免郵件服務器/後台不接受）。"""
+    pools = (string.ascii_uppercase, string.ascii_lowercase, string.digits)
+    chars = "".join(pools)
+    while True:
+        pw = "".join(secrets.choice(chars) for _ in range(length))
+        if all(any(c in p for c in pw) for p in pools):
+            return pw
 
 
 def derive_key(password, salt_b64, n=SCRYPT_N):

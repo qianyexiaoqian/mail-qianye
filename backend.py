@@ -384,6 +384,25 @@ class Api:
         self._bulk("UPDATE accounts SET sheet_id=? WHERE id IN ({})", ids, [sheet_id])
 
     @need_unlock
+    def update_fields(self, updates):
+        """批量改字段：updates = [{"id": 1, "fields": {"notes": "...", "phone": "..."}}]，只改給出的字段。"""
+        now = int(time.time())
+        st = self._store
+        with st.lock:
+            for u in updates or []:
+                fields = {k: str(v if v is not None else "").strip() for k, v in (u.get("fields") or {}).items() if k in FIELDS}
+                if not fields:
+                    continue
+                if "totp_secret" in fields:
+                    fields["totp_secret"] = clean_secret(fields["totp_secret"])
+                for k in fields:
+                    if k in SECRET_FIELDS:
+                        fields[k] = self._cipher.encrypt(fields[k])
+                sets = ", ".join(f"{k}=?" for k in fields)
+                st.conn.execute(f"UPDATE accounts SET {sets}, updated_at=? WHERE id=?", [*fields.values(), now, int(u["id"])])
+            st.conn.commit()
+
+    @need_unlock
     def set_extra(self, ids, key, value):
         ids = [int(i) for i in ids]
         if not ids:
@@ -481,6 +500,85 @@ class Api:
             full.get("admin_password"), full.get("admin_verify_cert"))
         return {"total": client.list_mailboxes()}
 
+    # ---------- 自動創建自建郵箱（管理員模式） ----------
+    def _admin_cfg(self):
+        cfg = self._mail_config(with_secret=True)
+        if not (cfg.get("admin_enabled") and cfg.get("panel_url")):
+            raise ValueError("err.admin_required")
+        return cfg
+
+    @need_unlock
+    def selfmail_domains(self):
+        """可用來創建郵箱的域名：BillionMail 後台的域名 + 設置裡填的自建域名。"""
+        cfg = self._mail_config(with_secret=True)
+        domains = [d.strip().lower() for d in re.split(r"[\s,，;]+", cfg.get("domains") or "") if d.strip()]
+        admin = bool(cfg.get("admin_enabled") and cfg.get("panel_url"))
+        error = ""
+        if admin:
+            try:
+                for d in self._admin_client(cfg).list_domains():
+                    if d.lower() not in domains:
+                        domains.append(d.lower())
+            except Exception as e:  # 後台連不上也把設置裡的域名返回
+                error = str(e)
+        return {"domains": domains, "admin": admin, "error": error}
+
+    @staticmethod
+    def _local_part(address):
+        """主郵箱 john.doe+x@gmail.com → johndoe（BillionMail 只允許字母數字 _ -）。"""
+        local = (address or "").split("@")[0].split("+")[0].lower()
+        return re.sub(r"[^a-z0-9_-]", "", local)
+
+    def _create_self_mailbox(self, cfg, main_email, domain):
+        domain = (domain or "").strip().lower().lstrip("@")
+        base = self._local_part(main_email)
+        if not domain or not base:
+            raise ValueError("err.selfmail_bad_input")
+        client = self._admin_client(cfg)
+        # 同名郵箱已存在時加數字後綴
+        for i in range(0, 20):
+            local = base if i == 0 else f"{base}{i + 1}"
+            address = f"{local}@{domain}"
+            if client.get_password(address) is None:
+                break
+        else:
+            raise RuntimeError("err.selfmail_exists")
+        password = vault.random_password(14)
+        client.create_mailbox(domain, local, password)
+        self._pw_cache[address] = password
+        return {"address": address, "password": password}
+
+    @need_unlock
+    def create_self_mailbox(self, main_email, domain):
+        """以主郵箱的用戶名在自建域名下創建郵箱，返回 {address, password}，由前端填進輔助郵箱。"""
+        return self._create_self_mailbox(self._admin_cfg(), main_email, domain)
+
+    @need_unlock
+    def create_recovery_mailboxes(self, ids, domain, overwrite=False):
+        """批量：給這些賬號創建自建輔助郵箱並保存。已有輔助郵箱的默認跳過。"""
+        cfg = self._admin_cfg()
+        ids = [int(i) for i in ids or []]
+        if not ids:
+            return {"created": [], "skipped": 0, "failed": []}
+        rows = self._store.query(f"SELECT * FROM accounts WHERE id IN ({','.join('?' for _ in ids)})", ids)
+        created, failed, skipped = [], [], 0
+        for r in rows:
+            a = self._decrypt_row(r)
+            if a["recovery_email"] and not overwrite:
+                skipped += 1
+                continue
+            try:
+                box = self._create_self_mailbox(cfg, a["email"], domain)
+            except Exception as e:
+                failed.append({"email": a["email"], "error": str(e)})
+                continue
+            self._store.execute(
+                "UPDATE accounts SET recovery_email=?, recovery_password=?, updated_at=? WHERE id=?",
+                (box["address"], self._cipher.encrypt(box["password"]), int(time.time()), a["id"]),
+            )
+            created.append({"email": a["email"], "recovery_email": box["address"]})
+        return {"created": created, "skipped": skipped, "failed": failed}
+
     @need_unlock
     def fetch_mail(self, account_id, which="recovery"):
         """讀取某個賬號的輔助郵箱（which="recovery"）或主郵箱（which="email"）的最新郵件。"""
@@ -556,9 +654,16 @@ class Api:
         if not lines:
             raise ValueError("err.ai_no_lines")
         cfg = self._ai_full_config()
-        messages = aifix.fix_messages(cfg.get("prompt"), lines)
+        return self._start_ai_job(cfg, aifix.fix_messages(cfg.get("prompt"), lines))
+
+    @need_unlock
+    def ai_chat_start(self, messages, tools=None):
+        """AI 助手：前端維護對話和執行工具，這裡只負責一輪流式請求。結束時 poll 返回 tool_calls。"""
+        return self._start_ai_job(self._ai_full_config(), messages, tools)
+
+    def _start_ai_job(self, cfg, messages, tools=None):
         job_id = uuid.uuid4().hex
-        job = {"text": "", "done": False, "error": "", "stop": False}
+        job = {"text": "", "done": False, "error": "", "stop": False, "tool_calls": []}
         self._ai_jobs[job_id] = job
 
         def run():
@@ -566,7 +671,7 @@ class Api:
                 job["text"] += piece
 
             try:
-                aifix.stream_chat(cfg, messages, on_delta, lambda: job["stop"])
+                job["tool_calls"] = aifix.stream_chat(cfg, messages, on_delta, lambda: job["stop"], tools)
             except Exception as e:  # 錯誤帶回前端
                 job["error"] = str(e)
             finally:
@@ -581,12 +686,13 @@ class Api:
         offset = int(offset or 0)
         job = self._ai_jobs.get(job_id)
         if job is None:
-            return {"delta": "", "offset": offset, "done": True, "error": ""}
+            return {"delta": "", "offset": offset, "done": True, "error": "", "tool_calls": []}
         done = job["done"]  # 先讀 done 再讀文本，保證結束前的最後一段不會漏
         text = job["text"]
         if done:
             self._ai_jobs.pop(job_id, None)
-        return {"delta": text[offset:], "offset": len(text), "done": done, "error": job["error"]}
+        return {"delta": text[offset:], "offset": len(text), "done": done, "error": job["error"],
+                "tool_calls": job["tool_calls"] if done else []}
 
     def ai_fix_stop(self, job_id):
         job = self._ai_jobs.pop(job_id, None)

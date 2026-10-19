@@ -78,6 +78,31 @@ class BillionMailAdmin:
                 return m.get("password") or ""
         return None
 
+    def _authed(self, method, path, body=None):
+        """帶登錄態調用；token 過期（code 非 0 且像是鑑權錯誤）時重登一次。"""
+        if not self.token:
+            self.login()
+        j = self._call(method, path, body)
+        if j.get("code") in (401, 403) or "token" in str(j.get("msg") or j.get("message") or "").lower():
+            self.token = None
+            self.login()
+            j = self._call(method, path, body)
+        return j
+
+    def list_domains(self):
+        """後台裡的所有郵件域名。"""
+        j = self._authed("GET", "/api/domains/list?page=1&page_size=200")
+        return [d.get("domain") for d in ((j.get("data") or {}).get("list") or []) if d.get("domain")]
+
+    def create_mailbox(self, domain, local_part, password, full_name=""):
+        """新建郵箱，成功返回 True；失敗拋出帶後台提示的錯誤。"""
+        body = {"domain": domain, "local_part": local_part, "password": password, "full_name": full_name or local_part,
+                "active": 1, "isAdmin": 0, "quota": 5242880, "quota_active": 1}
+        j = self._authed("POST", "/api/mailbox/create", body)
+        if j.get("code") in (0, None) and j.get("success") is not False:
+            return True
+        raise RuntimeError(f"err.admin_create|{j.get('msg') or j.get('message') or j.get('code')}")
+
     def list_mailboxes(self):
         """返回所有郵箱地址（測試連接用）。"""
         if not self.token:
