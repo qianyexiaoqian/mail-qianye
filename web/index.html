@@ -8,6 +8,7 @@
 <script src="vue.global.prod.js"></script>
 <script src="i18n.js"></script>
 <script src="countries.js"></script>
+<script src="importer.js"></script>
 </head>
 <body>
 <div id="app" v-cloak>
@@ -35,7 +36,7 @@
   <!-- ========== 側邊欄 ========== -->
   <aside class="sidebar">
     <div class="brand">
-      <span>✉ {{ t('app.title') }}</span>
+      <span>📧 {{ t('app.title') }}</span>
       <button class="icon-btn" :title="t('settings.theme')" @click="toggleTheme">{{ isDark ? '☀' : '☾' }}</button>
     </div>
 
@@ -161,12 +162,21 @@
     </div>
 
     <div class="table-wrap" ref="tableWrap" @scroll="onTableScroll">
-      <table class="grid">
+      <table class="grid main-grid" :style="tableStyle">
+        <colgroup>
+          <col style="width:34px">
+          <col v-for="c in visibleColumns" :key="c.key" :style="{width: colWidth(c) + 'px'}">
+          <col>
+        </colgroup>
         <thead>
           <tr>
             <th class="col-check"><input type="checkbox" :checked="allPageSelected" @change="togglePage($event)"></th>
-            <th v-for="c in visibleColumns" :key="c.key" :class="['col-' + c.key, {sortable: c.sort}]" @click="c.sort && toggleSort(c.key)">
-              {{ c.label }}<span v-if="sort.key === c.key" class="sort">{{ sort.dir > 0 ? '▲' : '▼' }}</span>
+            <th v-for="c in visibleColumns" :key="c.key" :class="['col-' + c.key, {sortable: c.sort, dragging: dragCol === c.key, 'drag-over': dragOver === c.key}]"
+                draggable="true" :title="c.label + ' · ' + t('columns.dragTip')" @click="onHeaderClick(c)"
+                @dragstart="onColDragStart(c, $event)" @dragover="onColDragOver(c, $event)" @dragleave="dragOver === c.key && (dragOver = '')"
+                @drop.prevent="onColDrop(c)" @dragend="onColDragEnd">
+              <span class="th-label">{{ c.label }}</span><span v-if="sort.key === c.key" class="sort">{{ sort.dir > 0 ? '▲' : '▼' }}</span>
+              <span class="col-resizer" draggable="false" @mousedown.stop.prevent="startResize(c, $event)" @click.stop @dblclick.stop="resetWidth(c)"></span>
             </th>
             <th class="col-actions">{{ t('col.actions') }}</th>
           </tr>
@@ -174,9 +184,9 @@
         <tbody>
           <tr v-for="a in paged" :key="a.id" :class="{selected: selected[a.id]}" @dblclick="openEdit(a)">
             <td class="col-check"><input type="checkbox" v-model="selected[a.id]"></td>
-            <td v-for="c in visibleColumns" :key="c.key" :class="'col-' + c.key">
+            <td v-for="c in visibleColumns" :key="c.key" :class="['col-' + c.key, c.custom && 'type-' + c.col.type]">
               <template v-if="c.key === 'email'">
-                <span class="copy mono" @click="copy(a.email, t('copy.email'))">{{ a.email }}</span>
+                <span class="copy mono" :title="a.email" @click="copy(a.email, t('copy.email'))">{{ a.email }}</span>
                 <button v-if="mailEligible(a, 'email')" class="icon-btn sm inbox-btn" :title="t('mail.open')" @click="openInbox(a, 'email')">📥</button>
               </template>
               <template v-else-if="c.key === 'password' || c.key === 'recovery_password'">
@@ -189,7 +199,7 @@
                 <span v-else class="muted">—</span>
               </template>
               <template v-else-if="c.key === 'recovery_email' || c.key === 'phone'">
-                <span v-if="a[c.key]" class="copy mono" @click="copy(a[c.key])">{{ a[c.key] }}</span>
+                <span v-if="a[c.key]" class="copy mono" :title="a[c.key]" @click="copy(a[c.key])">{{ a[c.key] }}</span>
                 <button v-if="c.key === 'recovery_email' && mailEligible(a, 'recovery')" class="icon-btn sm inbox-btn"
                         :title="t('mail.open')" @click="openInbox(a, 'recovery')">📥</button>
               </template>
@@ -346,8 +356,8 @@
   </div>
 
   <!-- ========== 批量導入 ========== -->
-  <div v-if="imp" class="modal-mask" @mousedown.self="imp = null">
-    <div class="modal wide">
+  <div v-if="imp" class="modal-mask" @mousedown.self="closeImport">
+    <div class="modal wide import-modal">
       <h3>{{ t('import.title', {name: sheetName(currentSheet)}) }}</h3>
       <textarea v-model="imp.text" rows="9" class="mono" :placeholder="t('import.placeholder')"></textarea>
       <div class="import-opts">
@@ -373,26 +383,100 @@
         <button v-if="!colorColumns.length" class="link" @click="addColorColumn">{{ t('import.addColorCol') }}</button>
       </div>
       <div class="import-presets">
-        <span class="muted">{{ t('import.preset') }}</span>
-        <button v-for="p in importPresets" :key="p.name" class="btn sm" @click="applyPreset(p.order)">{{ p.name }}</button>
+        <span class="muted">{{ t('import.mode') }}</span>
+        <button class="btn sm" :class="{primary: imp.mode === 'smart'}" :title="t('import.modeSmartTip')" @click="imp.mode = 'smart'">✨ {{ t('import.modeSmart') }}</button>
+        <button class="btn sm" :class="{primary: imp.mode === 'manual'}" @click="imp.mode = 'manual'">{{ t('import.modeManual') }}</button>
       </div>
-      <div class="import-order">
-        <span class="muted">{{ t('import.order') }}</span>
-        <select v-for="(f, i) in imp.order" :key="i" v-model="imp.order[i]">
-          <option v-for="opt in importFields" :value="opt">{{ t('import.colN', {i: i + 1, f: t('col.' + opt)}) }}</option>
-        </select>
+      <template v-if="imp.mode === 'manual'">
+        <div class="import-presets">
+          <span class="muted">{{ t('import.preset') }}</span>
+          <button v-for="p in importPresets" :key="p.name" class="btn sm" @click="applyPreset(p.order)">{{ p.name }}</button>
+        </div>
+        <div class="import-order">
+          <span class="muted">{{ t('import.order') }}</span>
+          <select v-for="(f, i) in imp.order" :key="i" v-model="imp.order[i]">
+            <option v-for="opt in importFields" :value="opt">{{ t('import.colN', {i: i + 1, f: t('col.' + opt)}) }}</option>
+          </select>
+          <button class="icon-btn" :title="t('import.addCol')" @click="imp.order.push('skip')">＋</button>
+          <button v-if="imp.order.length > 1" class="icon-btn" :title="t('import.removeCol')" @click="imp.order.pop()">－</button>
+        </div>
+      </template>
+      <div v-else class="muted import-hint">{{ t('import.modeSmartTip') }}</div>
+
+      <div class="preview" v-if="impRows.length">
+        <div class="muted">
+          {{ t('import.preview', {n: impRows.length}) }}
+          <span v-if="impPreviewFields.includes('country')"> · {{ countryColumns.length ? t('import.countryCol', {name: countryColumns[0].name}) : t('import.countryNewCol') }}</span>
+        </div>
+        <div class="mini-wrap">
+          <table class="grid mini">
+            <tr><th v-for="f in impPreviewFields">{{ t('col.' + f) }}</th></tr>
+            <tr v-for="(r, i) in impRows.slice(0, 5)" :key="i">
+              <td v-for="f in impPreviewFields" class="mono">
+                <template v-if="f === 'country' && r.country">{{ flag(r.country) }} {{ r.country }}</template>
+                <template v-else>{{ r[f] }}</template>
+              </td>
+            </tr>
+          </table>
+        </div>
       </div>
-      <div class="preview" v-if="imp.preview.length">
-        <div class="muted">{{ t('import.preview', {n: imp.preview.length}) }}</div>
-        <table class="grid mini">
-          <tr><th v-for="f in imp.order.filter(x => x !== 'skip')">{{ t('col.' + f) }}</th></tr>
-          <tr v-for="(r, i) in imp.preview.slice(0, 5)" :key="i"><td v-for="f in imp.order.filter(x => x !== 'skip')" class="mono">{{ r[f] }}</td></tr>
-        </table>
+
+      <!-- 無法識別的行 + AI 糾錯 -->
+      <div v-if="impParsed.failed.length" class="import-failed">
+        <div class="editor-row">
+          <button class="link warn-text" @click="imp.showFailed = !imp.showFailed">{{ imp.showFailed ? '▾' : '▸' }} {{ t('import.failed', {n: impParsed.failed.length}) }}</button>
+          <span class="spacer"></span>
+          <button v-if="imp.ai && imp.ai.running" class="btn sm" @click="stopAiFix">⏹ {{ t('import.aiStop') }}</button>
+          <button v-else class="btn sm primary" @click="startAiFix">🤖 {{ imp.ai ? t('import.aiRetry') : t('import.aiFix') }}</button>
+        </div>
+        <div v-if="imp.showFailed" class="failed-list">
+          <div v-for="f in impParsed.failed.slice(0, 200)" :key="f.n" class="failed-item">
+            <span class="muted">#{{ f.n }}</span><span class="mono ellipsis" :title="f.raw">{{ f.raw }}</span>
+            <span class="warn-text ellipsis" :title="importReason(f)">{{ importReason(f) }}</span>
+          </div>
+        </div>
+        <label v-if="impParsed.failed.some(f => f.row)" class="check muted"><input type="checkbox" v-model="imp.keepPartial"> {{ t('import.keepPartial') }}</label>
+        <div class="muted import-hint">{{ t('import.aiPrivacy') }}</div>
+
+        <div v-if="imp.ai" class="ai-box">
+          <div class="editor-row">
+            <span v-if="imp.ai.running" class="spinner"></span>
+            <b>{{ imp.ai.running ? t('import.aiRunning', {n: impAiRows.length, m: imp.ai.lines.length}) : t('import.aiResult') }}</b>
+            <span class="spacer"></span>
+            <template v-if="impAiRows.length">
+              <button class="link" @click="setAllAi(true)">{{ t('import.aiAll') }}</button>
+              <button class="link" @click="setAllAi(false)">{{ t('import.aiNone') }}</button>
+            </template>
+            <button class="link" @click="imp.ai.showRaw = !imp.ai.showRaw">{{ imp.ai.showRaw ? t('import.aiHideRaw') : t('import.aiShowRaw') }}</button>
+          </div>
+          <div v-if="imp.ai.error" class="inbox-error">{{ imp.ai.error }}</div>
+          <pre v-if="imp.ai.showRaw" class="ai-raw">{{ imp.ai.text || '…' }}</pre>
+          <div v-if="impAiRows.length" class="mini-wrap">
+            <table class="grid mini ai-table">
+              <tr>
+                <th></th><th>{{ t('import.raw') }}</th>
+                <th v-for="f in impAiFields">{{ t('col.' + f) }}</th>
+              </tr>
+              <tr v-for="r in impAiRows" :key="r.raw" :class="{off: !r.checked}">
+                <td><input type="checkbox" v-model="r.checked"></td>
+                <td class="mono raw-cell" :title="r.raw">{{ r.raw }}<div v-if="!r.ok && r.reason" class="warn-text">{{ r.reason }}</div></td>
+                <td v-for="f in impAiFields">
+                  <input v-if="f !== 'country'" v-model="r.row[f]" class="mono" :class="{bad: f === 'email' && r.checked && !validEmail(r.row.email)}">
+                  <input v-else :value="r.row.country || ''" class="mono country-in" maxlength="2" @input="r.row.country = $event.target.value.toUpperCase()">
+                </td>
+              </tr>
+            </table>
+          </div>
+          <div class="muted import-hint">{{ t('import.aiConfirmHint') }}</div>
+        </div>
       </div>
+
       <div class="modal-foot">
         <span class="spacer"></span>
-        <button class="btn" @click="imp = null">{{ t('btn.cancel') }}</button>
-        <button class="btn primary" :disabled="!imp.preview.length" @click="doImport">{{ t('import.submit', {n: imp.preview.length}) }}</button>
+        <button class="btn" @click="closeImport">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" :disabled="!impRows.length || (imp.ai && imp.ai.running)" @click="doImport">
+          {{ impAiChecked.length ? t('import.submitAi', {n: impRows.length, m: impAiChecked.length}) : t('import.submit', {n: impRows.length}) }}
+        </button>
       </div>
     </div>
   </div>
@@ -419,22 +503,31 @@
   <div v-if="colEdit" class="modal-mask" @mousedown.self="colEdit = null">
     <div class="modal">
       <h3>{{ t('columns.title') }}</h3>
-      <div class="muted">{{ t('columns.visible') }}</div>
-      <div class="col-toggles">
-        <label v-for="c in baseColumns" :key="c.key" class="check"><input type="checkbox" v-model="colEdit.visible[c.key]" :disabled="c.key === 'email'"> {{ t('col.' + c.key) }}</label>
+      <div class="muted">{{ t('columns.orderHint') }}</div>
+      <div class="col-list">
+        <div v-for="(c, i) in colEdit.items" :key="c.key" class="group-row col-item" :class="{hidden: !c.visible}">
+          <input type="checkbox" v-model="c.visible" :disabled="c.key === 'email'" :title="t('columns.show')">
+          <template v-if="c.col">
+            <input v-model="c.col.name" :placeholder="t('columns.namePlaceholder')">
+            <select v-model="c.col.type" :title="t('columns.type')">
+              <option v-for="ty in columnTypes" :value="ty">{{ t('type.' + ty) }}</option>
+            </select>
+          </template>
+          <span v-else class="col-name">{{ c.label }}</span>
+          <button class="icon-btn" :title="t('columns.up')" :disabled="i === 0" @click="moveColumn(i, -1)">↑</button>
+          <button class="icon-btn" :title="t('columns.down')" :disabled="i === colEdit.items.length - 1" @click="moveColumn(i, 1)">↓</button>
+          <button v-if="c.col" class="icon-btn" :title="t('btn.delete')" @click="colEdit.items.splice(i, 1)">✕</button>
+          <span v-else class="icon-btn"></span>
+        </div>
       </div>
-      <div class="section-title">{{ t('columns.custom', {name: sheetName(currentSheet)}) }}</div>
-      <div v-for="(c, i) in colEdit.custom" :key="c.id" class="group-row">
-        <input v-model="c.name" :placeholder="t('columns.namePlaceholder')">
-        <select v-model="c.type" :title="t('columns.type')">
-          <option v-for="ty in columnTypes" :value="ty">{{ t('type.' + ty) }}</option>
-        </select>
-        <button class="icon-btn" :title="t('columns.up')" :disabled="i === 0" @click="moveColumn(i, -1)">↑</button>
-        <button class="icon-btn" :title="t('columns.down')" :disabled="i === colEdit.custom.length - 1" @click="moveColumn(i, 1)">↓</button>
-        <button class="icon-btn" :title="t('btn.delete')" @click="colEdit.custom.splice(i, 1)">✕</button>
+      <div class="editor-row">
+        <button class="btn sm" @click="addCustomColumn">{{ t('columns.add') }}</button>
+        <span class="spacer"></span>
+        <button class="btn sm" @click="resetColumnOrder">{{ t('columns.resetOrder') }}</button>
+        <button class="btn sm" @click="resetWidths">{{ t('columns.resetWidth') }}</button>
       </div>
-      <button class="btn sm" @click="colEdit.custom.push({id: 'c' + Date.now().toString(36), name: '', type: 'text'})">{{ t('columns.add') }}</button>
       <div class="modal-foot">
+        <span class="muted">{{ t('columns.customHint', {name: sheetName(currentSheet)}) }}</span>
         <span class="spacer"></span>
         <button class="btn" @click="colEdit = null">{{ t('btn.cancel') }}</button>
         <button class="btn primary" @click="saveColumns">{{ t('btn.save') }}</button>
@@ -492,6 +585,27 @@
             <span :class="settings.adminOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.adminMsg }}</span>
           </div>
         </template>
+      </div>
+
+      <div class="section-title">{{ t('ai.section') }}</div>
+      <div v-if="settings.ai" class="form-grid">
+        <div class="full muted mail-hint">{{ t('ai.hint') }}</div>
+        <div class="full editor-row ai-presets">
+          <span class="muted">{{ t('ai.preset') }}</span>
+          <button v-for="p in aiPresets" :key="p.name" class="btn sm" :class="{primary: settings.ai.base_url === p.base_url}" @click="applyAiPreset(p)">{{ p.name }}</button>
+        </div>
+        <label class="full">{{ t('ai.url') }}<input v-model="settings.ai.base_url" class="mono" placeholder="https://api.openai.com/v1"></label>
+        <label>{{ t('ai.model') }}<input v-model="settings.ai.model" class="mono" placeholder="gpt-4o-mini"></label>
+        <label>{{ t('ai.key') }}<input type="password" v-model="settings.ai.api_key" class="mono" :placeholder="settings.ai.has_api_key ? t('mail.masterPwSet') : 'sk-…'"></label>
+        <label class="full">
+          <span class="editor-row">{{ t('ai.prompt') }}<span class="spacer"></span>
+            <button class="link" @click="settings.ai.prompt = settings.ai.default_prompt">{{ t('ai.resetPrompt') }}</button></span>
+          <textarea v-model="settings.ai.prompt" rows="6" class="mono ai-prompt"></textarea>
+        </label>
+        <div class="full editor-row">
+          <button class="btn sm" :disabled="settings.aiTesting || !settings.ai.base_url" @click="testAi">{{ settings.aiTesting ? t('mail.testing') : t('ai.test') }}</button>
+          <span :class="settings.aiOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.aiMsg }}</span>
+        </div>
       </div>
 
       <div class="section-title">{{ t('settings.changePw') }}</div>

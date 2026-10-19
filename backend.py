@@ -11,9 +11,11 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 
 import pyotp
 
+import aifix
 import billionmail
 import mailfetch
 import vault
@@ -159,18 +161,6 @@ def normalize_column(col):
     }
 
 
-def split_line(line, sep):
-    if sep != "auto":
-        return [p.strip() for p in line.split(sep)]
-    for candidate in ("----", "\t", "|", ",", ";"):
-        if candidate in line:
-            return [p.strip() for p in line.split(candidate)]
-    # 最後嘗試冒號（email:password 格式）
-    if line.count(":") >= 1:
-        return [p.strip() for p in line.split(":")]
-    return [line.strip()]
-
-
 class Api:
     def __init__(self, db_path=None):
         self.db_path = db_path or os.path.join(app_dir(), "mail_data.db")
@@ -179,6 +169,7 @@ class Api:
         self._cipher = None  # 解鎖後才有
         self._admin = None  # BillionMail 後台客戶端（登錄一次後復用）
         self._pw_cache = {}  # 管理員模式下解析到的郵箱密碼緩存（內存，鎖定即清）
+        self._ai_jobs = {}  # AI 糾錯任務：job_id -> {"text", "done", "error", "stop"}
 
     # ---------- 主密碼 ----------
     def get_lock_state(self):
@@ -205,6 +196,9 @@ class Api:
         self._cipher = None
         self._admin = None
         self._pw_cache = {}
+        for job in self._ai_jobs.values():
+            job["stop"] = True
+        self._ai_jobs = {}
 
     @need_unlock
     def change_password(self, old_password, new_password):
@@ -219,15 +213,16 @@ class Api:
         salt = vault.new_salt()
         cipher = vault.Cipher(vault.derive_key(password, salt))
         settings = {"kdf_salt": salt, "kdf_n": str(vault.SCRYPT_N), "verifier": cipher.encrypt(vault.VERIFIER)}
-        mail_cfg = json.loads(self._store.get_setting("mail_config") or "{}")
-        changed = False
-        for key in ("admin_password",):  # 配置裡的密碼也跟著換密鑰
-            if mail_cfg.get(key):
-                plain = old.decrypt(mail_cfg[key]) if old else mail_cfg[key]
-                mail_cfg[key] = cipher.encrypt(plain)
-                changed = True
-        if changed:
-            settings["mail_config"] = json.dumps(mail_cfg, ensure_ascii=False)
+        for name, keys in (("mail_config", self._MAIL_SECRETS), ("ai_config", self._AI_SECRETS)):
+            cfg = json.loads(self._store.get_setting(name) or "{}")
+            changed = False
+            for key in keys:  # 配置裡的密碼 / Key 也跟著換密鑰
+                if cfg.get(key):
+                    plain = old.decrypt(cfg[key]) if old else cfg[key]
+                    cfg[key] = cipher.encrypt(plain)
+                    changed = True
+            if changed:
+                settings[name] = json.dumps(cfg, ensure_ascii=False)
         st = self._store
         with st.lock:
             conn = st.conn
@@ -496,6 +491,99 @@ class Api:
         return {"address": address, "provider": "microsoft" if mailfetch.is_microsoft(address) else "self",
                 "messages": mailfetch.fetch(box, int(cfg.get("limit") or 15))}
 
+    # ---------- AI 糾錯（OpenAI 兼容接口） ----------
+    _AI_DEFAULTS = {"base_url": aifix.DEFAULT_BASE_URL, "model": aifix.DEFAULT_MODEL, "prompt": ""}
+    _AI_SECRETS = ("api_key",)
+
+    def _ai_config(self, with_secret=False):
+        cfg = {**self._AI_DEFAULTS, **json.loads(self._store.get_setting("ai_config") or "{}")}
+        cfg["prompt"] = cfg.get("prompt") or aifix.DEFAULT_PROMPT
+        cfg["default_prompt"] = aifix.DEFAULT_PROMPT
+        for key in self._AI_SECRETS:
+            enc = cfg.pop(key, "")
+            cfg["has_" + key] = bool(enc)
+            if with_secret:
+                cfg[key] = self._cipher.decrypt(enc) if enc else ""
+        return cfg
+
+    @need_unlock
+    def get_ai_config(self):
+        return self._ai_config()
+
+    @need_unlock
+    def set_ai_config(self, cfg):
+        """Key：None / 不傳 = 保持原值，"" = 清除。提示詞和默認一樣時不保存，以後默認提示詞更新能自動生效。"""
+        old = json.loads(self._store.get_setting("ai_config") or "{}")
+        new = {k: (cfg.get(k, v) or "").strip() for k, v in self._AI_DEFAULTS.items()}
+        if new["prompt"] == aifix.DEFAULT_PROMPT.strip():
+            new["prompt"] = ""
+        for key in self._AI_SECRETS:
+            val = cfg.get(key)
+            if val is None:
+                new[key] = old.get(key, "")
+            else:
+                new[key] = self._cipher.encrypt(val.strip()) if val.strip() else ""
+        self._store.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('ai_config', ?)", (json.dumps(new, ensure_ascii=False),)
+        )
+
+    def _ai_full_config(self, cfg=None):
+        """已保存的配置 + 界面上未保存的修改（Key 沒重新輸入時用已保存的）。"""
+        full = self._ai_config(with_secret=True)
+        for k, v in (cfg or {}).items():
+            if k in self._AI_SECRETS and v in (None, ""):
+                continue
+            full[k] = v
+        return full
+
+    @need_unlock
+    def test_ai(self, cfg=None):
+        return {"reply": aifix.test(self._ai_full_config(cfg))}
+
+    @need_unlock
+    def ai_fix_start(self, lines):
+        """後台線程流式請求，前端用 ai_fix_poll 輪詢增量文本。"""
+        lines = [str(x) for x in (lines or []) if str(x).strip()]
+        if not lines:
+            raise ValueError("err.ai_no_lines")
+        cfg = self._ai_full_config()
+        messages = aifix.fix_messages(cfg.get("prompt"), lines)
+        job_id = uuid.uuid4().hex
+        job = {"text": "", "done": False, "error": "", "stop": False}
+        self._ai_jobs[job_id] = job
+
+        def run():
+            def on_delta(piece):
+                job["text"] += piece
+
+            try:
+                aifix.stream_chat(cfg, messages, on_delta, lambda: job["stop"])
+            except Exception as e:  # 錯誤帶回前端
+                job["error"] = str(e)
+            finally:
+                job["done"] = True
+
+        threading.Thread(target=run, daemon=True).start()
+        return job_id
+
+    @need_unlock
+    def ai_fix_poll(self, job_id, offset=0):
+        """offset 用上次返回的值（Python 字符下標，和 JS 字符串長度不一定相同）。"""
+        offset = int(offset or 0)
+        job = self._ai_jobs.get(job_id)
+        if job is None:
+            return {"delta": "", "offset": offset, "done": True, "error": ""}
+        done = job["done"]  # 先讀 done 再讀文本，保證結束前的最後一段不會漏
+        text = job["text"]
+        if done:
+            self._ai_jobs.pop(job_id, None)
+        return {"delta": text[offset:], "offset": len(text), "done": done, "error": job["error"]}
+
+    def ai_fix_stop(self, job_id):
+        job = self._ai_jobs.pop(job_id, None)
+        if job:
+            job["stop"] = True
+
     # ---------- 2FA ----------
     def totp_codes(self, secrets):
         """批量生成驗證碼，返回 {secret: code}。"""
@@ -503,40 +591,30 @@ class Api:
 
     # ---------- 導入 / 導出 ----------
     @need_unlock
-    def preview_import(self, text, sep, order):
-        rows = []
-        for line in (text or "").splitlines():
-            if not line.strip():
-                continue
-            parts = split_line(line.strip(), sep)
-            row = {}
-            for i, field in enumerate(order):
-                if field != "skip" and i < len(parts):
-                    row[field] = parts[i]
-            if row.get("email"):
-                rows.append(row)
-        return rows
-
-    @need_unlock
-    def import_accounts(self, sheet_id, text, sep, order, group_id=None, status="正常", skip_dup=True, extra=None):
-        """extra：所有導入行共用的自定義列值，例如顏色標記、國家。"""
-        extra_json = json.dumps({k: v for k, v in (extra or {}).items() if v}, ensure_ascii=False)
-        rows = self.preview_import(text, sep, order)
+    def import_rows(self, sheet_id, rows, group_id=None, status="正常", skip_dup=True, extra=None):
+        """rows：前端已解析好的行（字段見 FIELDS，可帶每行自己的 extra，例如國家）。
+        extra：所有導入行共用的自定義列值，例如顏色標記、國家；行自己的值優先。"""
+        common = {k: v for k, v in (extra or {}).items() if v}
         existing = set()
         if skip_dup:
             existing = {r["email"].lower() for r in self._store.query("SELECT email FROM accounts WHERE sheet_id=?", (sheet_id,))}
         now = int(time.time())
         batch = []
         skipped = 0
-        for r in rows:
-            key = r["email"].lower()
+        for r in rows or []:
+            values = {f: str(r.get(f) or "").strip() for f in FIELDS}
+            key = values["email"].lower()
+            if not key:
+                continue
             if key in existing:
                 skipped += 1
                 continue
             existing.add(key)
-            r["totp_secret"] = clean_secret(r.get("totp_secret", ""))
-            self._encrypt_row(r)
-            batch.append([sheet_id] + [r.get(f, "") for f in FIELDS] + [status, group_id or None, extra_json, now, now])
+            values["totp_secret"] = clean_secret(values["totp_secret"])
+            row_extra = {**common, **{k: v for k, v in (r.get("extra") or {}).items() if v}}
+            self._encrypt_row(values)
+            batch.append([sheet_id] + [values[f] for f in FIELDS]
+                         + [status, group_id or None, json.dumps(row_extra, ensure_ascii=False), now, now])
         cols = ", ".join(FIELDS)
         marks = ", ".join("?" for _ in FIELDS)
         self._store.executemany(

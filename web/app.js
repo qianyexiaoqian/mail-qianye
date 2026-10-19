@@ -76,10 +76,38 @@ const BASE_COLUMNS = [
 ];
 const DEFAULT_VISIBLE = { email: true, password: true, totp: true, recovery_email: true, recovery_password: false,
   phone: false, group: true, status: true, notes: true, updated: false };
+// 默認列寬（px），拖動表頭右邊緣可調整，記在 prefs.colWidths
+const DEFAULT_WIDTHS = { email: 250, password: 140, totp: 110, recovery_email: 230, recovery_password: 140, phone: 140,
+  group: 100, status: 80, notes: 240, updated: 140 };
+const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, image: 70 };
+const MIN_COL_WIDTH = 50;
 const DEFAULT_FILTERS = { group: '', status: '', domain: '', twofa: '', recovery: '', country: '' };
 const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize: 20, page: 1, scroll: 0, sheetId: null,
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
-  importOrder: ['email', 'password', 'totp_secret', 'recovery_email', 'skip', 'skip'], mailAuto: true, mailAutoCopy: false };
+  colOrders: {}, colWidths: {},  // 列順序按列表分別記（自定義列每個列表不同），_default 是最近一次調整的順序
+  importMode: 'smart', importOrder: ['email', 'password', 'totp_secret', 'recovery_email', 'skip', 'skip'],
+  mailAuto: true, mailAutoCopy: false };
+// 常用的 OpenAI 兼容服務，設置裡一鍵填入
+const AI_PRESETS = [
+  { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  { name: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  { name: '通義千問', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  { name: '硅基流動', base_url: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
+  { name: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
+  { name: 'Ollama', base_url: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b' },
+];
+
+/* 按保存的順序排列列；保存的順序裡沒有的列（新加的自定義列等）放在默認順序裡它前一列的後面 */
+function orderColumns(cols, order) {
+  const byKey = Object.fromEntries(cols.map(c => [c.key, c]));
+  const out = (order || []).filter(k => byKey[k]).map(k => byKey[k]);
+  cols.forEach((c, i) => {
+    if (out.includes(c)) return;
+    const prev = cols.slice(0, i).reverse().find(p => out.includes(p));
+    out.splice(prev ? out.indexOf(prev) + 1 : 0, 0, c);
+  });
+  return out;
+}
 
 // 搜索時忽略 . _ - 空格等符號：johndoe 能找到 john.doe@xxx
 const normalize = s => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -101,11 +129,11 @@ const app = createApp({
       codes: {}, now: Math.floor(Date.now() / 1000), lastWindow: 0,
       edit: null, editCode: '', imp: null, groupEdit: null, colEdit: null, dialog: null, settings: null,
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
-      exportMenu: false, toasts: [],
+      exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
       lock: { has_password: false, unlocked: false },
       lockForm: { pw: '', pw2: '', err: '', busy: false },
       systemDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
-      baseColumns: BASE_COLUMNS, columnTypes: COLUMN_TYPES, languages: LANGUAGES,
+      columnTypes: COLUMN_TYPES, languages: LANGUAGES,
     };
   },
 
@@ -113,24 +141,64 @@ const app = createApp({
     currentSheet() { return this.sheets.find(s => s.id === this.sheetId) || { columns: [], name: '' }; },
     dbName() { return (this.meta.db_path || '').split(/[\\/]/).pop(); },
     groupMap() { return Object.fromEntries(this.groups.map(g => [g.id, g])); },
-    importFields() { return [...this.meta.fields, 'skip']; },
+    importFields() { return [...this.meta.fields, ...IMPORT_EXTRA_FIELDS, 'skip']; },
     importPresets() {
       return [
         { name: t('import.presetDefault'), order: ['email', 'password', 'totp_secret', 'recovery_email'] },
+        { name: t('import.presetSlash'), order: ['email', 'password', 'recovery_email', 'totp_secret', 'country'] },
         { name: t('import.presetMs'), order: ['email', 'password'] },
         { name: t('import.presetMsToken'), order: ['email', 'password', 'oauth_client_id', 'oauth_token'] },
       ];
     },
-    importKey() { return this.imp ? JSON.stringify([this.imp.text, this.imp.sep, this.imp.order]) : ''; },
+    // 導入預覽在前端實時解析
+    impParsed() {
+      const i = this.imp;
+      return i ? parseImport(i.text, i.sep, i.mode, i.order) : { rows: [], failed: [] };
+    },
+    // 當前仍然是「無法識別」的原始行，AI 結果只對這些行生效（文本改了就自動作廢）
+    impFailedRaw() { return new Set(this.impParsed.failed.map(f => f.raw)); },
+    impAiRows() {
+      const ai = this.imp?.ai;
+      return ai ? ai.rows.filter(r => this.impFailedRaw.has(r.raw)) : [];
+    },
+    impAiChecked() { return this.impAiRows.filter(r => r.checked && this.validEmail(r.row.email)); },
+    // 最終要導入的行：識別成功的 + 勾選的 AI 糾錯結果 + （可選）原樣導入有郵箱的失敗行
+    impRows() {
+      const fixed = new Set(this.impAiChecked.map(r => r.raw));
+      const rows = [...this.impParsed.rows, ...this.impAiChecked.map(r => r.row)];
+      if (this.imp?.keepPartial) for (const f of this.impParsed.failed) if (f.row && !fixed.has(f.raw)) rows.push(f.row);
+      return rows;
+    },
+    impPreviewFields() {
+      const set = new Set(this.impRows.flatMap(r => Object.keys(r)));
+      return [...this.meta.fields, 'country'].filter(f => set.has(f));
+    },
+    // AI 結果表格顯示的字段：郵箱、密碼必顯示，其他有值才顯示
+    impAiFields() {
+      const set = new Set(['email', 'password', ...this.impAiRows.flatMap(r => Object.keys(r.row))]);
+      return [...this.meta.fields, 'country'].filter(f => set.has(f));
+    },
     remaining() { return 30 - (this.now % 30); },
     isDark() { return this.prefs.theme === 'dark' || (this.prefs.theme === 'system' && this.systemDark); },
 
-    visibleColumns() {
-      const cols = BASE_COLUMNS.filter(c => this.prefs.visible[c.key]).map(c => ({ ...c, label: t('col.' + c.key) }));
+    // 所有列（含隱藏的）的默認順序
+    defaultColumns() {
+      const cols = BASE_COLUMNS.map(c => ({ ...c, label: t('col.' + c.key) }));
       const custom = this.currentSheet.columns.map(col => ({ key: 'x_' + col.id, label: col.name, custom: true, col, sort: col.type !== 'image' }));
       const i = cols.findIndex(c => c.key === 'notes');  // 自定義列放在備註前面
       if (i >= 0) cols.splice(i, 0, ...custom); else cols.push(...custom);
       return cols;
+    },
+    // 按保存的順序排列
+    allColumns() {
+      const orders = this.prefs.colOrders || {};
+      return orderColumns(this.defaultColumns, orders[this.sheetId] || orders._default);
+    },
+    visibleColumns() { return this.allColumns.filter(c => this.isColumnVisible(c.key)); },
+    // 表格寬度 = 各列寬度之和（超出窗口時出現橫向滾動條），不足時撐滿
+    tableStyle() {
+      const sum = this.visibleColumns.reduce((n, c) => n + this.colWidth(c), 0) + 34 + 96;
+      return { width: `max(100%, ${sum}px)` };
     },
 
     groupCounts() {
@@ -235,7 +303,6 @@ const app = createApp({
     pageCount(v) { if (this.page > v) this.page = v; },
     sheetId(v) { this.prefs.sheetId = v; },
     'edit.totp_secret'(v) { this.refreshEditCode(v); },
-    importKey(v) { if (v) this.refreshImportPreview(); },
     'prefs.lang': { immediate: true, handler(v) {
       ui.lang = v;
       document.documentElement.lang = v;
@@ -327,10 +394,28 @@ const app = createApp({
       this.focusLock();
     },
     async openSettings() {
-      this.settings = { old: '', pw: '', pw2: '', err: '', busy: false, mail: null,
-        testing: false, testMsg: '', testOk: false, adminTesting: false, adminMsg: '', adminOk: false };
-      const mail = await call('get_mail_config');
-      if (this.settings) this.settings.mail = { ...mail, admin_password: '' };
+      this.settings = { old: '', pw: '', pw2: '', err: '', busy: false, mail: null, ai: null,
+        testing: false, testMsg: '', testOk: false, adminTesting: false, adminMsg: '', adminOk: false,
+        aiTesting: false, aiMsg: '', aiOk: false };
+      const [mail, ai] = await Promise.all([call('get_mail_config'), call('get_ai_config')]);
+      if (!this.settings) return;
+      this.settings.mail = { ...mail, admin_password: '' };
+      this.settings.ai = { ...ai, api_key: '' };
+    },
+    aiConfigPayload() {
+      const { has_api_key, default_prompt, ...cfg } = this.settings.ai;
+      cfg.api_key = cfg.api_key ? cfg.api_key : (has_api_key ? null : '');  // 留空 = 保持原 Key
+      return cfg;
+    },
+    applyAiPreset(p) { Object.assign(this.settings.ai, { base_url: p.base_url, model: p.model }); },
+    async testAi() {
+      const s = this.settings;
+      s.aiTesting = true; s.aiMsg = '';
+      try {
+        const r = await call('test_ai', this.aiConfigPayload());
+        s.aiOk = true; s.aiMsg = t('ai.testOk', { s: r.reply || '—' });
+      } catch (e) { s.aiOk = false; s.aiMsg = errText(e); }
+      s.aiTesting = false;
     },
     mailConfigPayload() {
       const m = this.settings.mail;
@@ -365,6 +450,7 @@ const app = createApp({
         await call('set_mail_config', this.mailConfigPayload());
         this.mailCfg = await call('get_mail_config');
       }
+      if (s.ai) await call('set_ai_config', this.aiConfigPayload());
       if (s.old || s.pw || s.pw2) {
         if (s.pw.length < 4) return (s.err = t('err.pw_short'));
         if (s.pw !== s.pw2) return (s.err = t('err.pw_mismatch'));
@@ -565,18 +651,100 @@ const app = createApp({
       this.toast(t('group.saved'));
     },
 
-    // ---------- 列設置 ----------
+    // ---------- 列設置 / 列順序 / 列寬 ----------
+    // 自定義列默認顯示（visible 裡沒有記錄 = 顯示），郵箱列總是顯示
+    isColumnVisible(key) {
+      if (key === 'email') return true;
+      return key.startsWith('x_') ? this.prefs.visible[key] !== false : !!this.prefs.visible[key];
+    },
+    colWidth(c) {
+      const w = this.prefs.colWidths?.[c.key];
+      if (w) return w;
+      return c.custom ? (DEFAULT_CUSTOM_WIDTHS[c.col.type] || 120) : (DEFAULT_WIDTHS[c.key] || 120);
+    },
+    saveColumnOrder(keys) {
+      this.prefs.colOrders = { ...this.prefs.colOrders, [this.sheetId]: keys, _default: keys };
+    },
+    startResize(c, e) {
+      const th = e.target.closest('th');
+      const startX = e.clientX, startW = th.offsetWidth;
+      this._resizing = true;
+      document.body.classList.add('col-resizing');
+      const move = ev => {
+        this.prefs.colWidths = { ...this.prefs.colWidths, [c.key]: Math.max(MIN_COL_WIDTH, Math.round(startW + ev.clientX - startX)) };
+      };
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        document.body.classList.remove('col-resizing');
+        setTimeout(() => { this._resizing = false; });  // 鬆開鼠標時的 click 不觸發排序
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    },
+    resetWidth(c) {
+      const { [c.key]: _, ...rest } = this.prefs.colWidths || {};
+      this.prefs.colWidths = rest;
+    },
+    onHeaderClick(c) {
+      if (this._resizing || !c.sort) return;
+      this.toggleSort(c.key);
+    },
+    // 拖動表頭調整列順序
+    onColDragStart(c, e) {
+      this.dragCol = c.key;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', c.key);
+    },
+    onColDragOver(c, e) {
+      if (!this.dragCol) return;
+      e.preventDefault();
+      this.dragOver = c.key === this.dragCol ? '' : c.key;
+    },
+    onColDrop(c) {
+      const from = this.dragCol;
+      this.dragCol = this.dragOver = '';
+      if (!from || from === c.key) return;
+      const keys = this.allColumns.map(x => x.key).filter(k => k !== from);
+      // 往右拖放在目標後面，往左拖放在目標前面
+      const before = this.allColumns.findIndex(x => x.key === from) > this.allColumns.findIndex(x => x.key === c.key);
+      keys.splice(keys.indexOf(c.key) + (before ? 0 : 1), 0, from);
+      this.saveColumnOrder(keys);
+    },
+    onColDragEnd() { this.dragCol = this.dragOver = ''; },
+
     openColumns() {
-      this.colEdit = { visible: { ...this.prefs.visible }, custom: this.currentSheet.columns.map(c => ({ ...c })) };
+      this.colEdit = {
+        items: this.allColumns.map(c => ({
+          key: c.key, label: c.label, visible: this.isColumnVisible(c.key),
+          col: c.custom ? { ...c.col } : null,
+        })),
+      };
     },
     moveColumn(i, d) {
-      const list = this.colEdit.custom;
+      const list = this.colEdit.items;
       [list[i], list[i + d]] = [list[i + d], list[i]];
     },
+    addCustomColumn() {
+      const id = 'c' + Date.now().toString(36);
+      this.colEdit.items.push({ key: 'x_' + id, visible: true, col: { id, name: '', type: 'text' } });
+    },
+    resetColumnOrder() {
+      const rank = k => { const i = this.defaultColumns.findIndex(c => c.key === k); return i < 0 ? 1e9 : i; };
+      this.colEdit.items.sort((a, b) => rank(a.key) - rank(b.key));
+    },
+    resetWidths() {
+      this.prefs.colWidths = {};
+      this.toast(t('columns.widthReset'));
+    },
     async saveColumns() {
-      this.prefs.visible = { ...this.colEdit.visible, email: true };
-      const custom = this.colEdit.custom.map(c => ({ ...c, name: c.name.trim() })).filter(c => c.name);
+      const items = this.colEdit.items.filter(it => !it.col || it.col.name.trim());
+      const visible = { ...this.prefs.visible };
+      for (const it of items) visible[it.key] = it.key === 'email' || it.visible;
+      this.prefs.visible = visible;
+      const custom = items.filter(it => it.col).map(it => ({ ...it.col, name: it.col.name.trim() }));
       await call('set_sheet_columns', this.sheetId, custom);
+      this.saveColumnOrder(items.map(it => it.key));
       this.colEdit = null;
       await this.refreshState();
       this.toast(t('columns.saved'));
@@ -684,35 +852,119 @@ const app = createApp({
 
     // ---------- 導入 / 導出 ----------
     openImport() {
-      this.imp = { text: '', sep: 'auto', order: [...this.prefs.importOrder],
-        group_id: typeof this.filters.group === 'number' ? this.filters.group : null, status: this.meta.statuses[0], skipDup: true, preview: [],
-        extra: {} };
+      const order = [...this.prefs.importOrder];
+      while (order.length < 6) order.push('skip');
+      this.imp = { text: '', sep: 'auto', mode: this.prefs.importMode === 'manual' ? 'manual' : 'smart', order,
+        group_id: typeof this.filters.group === 'number' ? this.filters.group : null, status: this.meta.statuses[0], skipDup: true,
+        extra: {}, keepPartial: false, showFailed: true, ai: null };
     },
-    applyPreset(order) { this.imp.order = [...order]; },
+    closeImport() {
+      this.stopAiFix();
+      this.imp = null;
+    },
+    applyPreset(order) {
+      const o = [...order];
+      while (o.length < 6) o.push('skip');
+      this.imp.order = o;
+      this.imp.mode = 'manual';
+    },
+    importReason(f) { return t(f.reason[0], f.reason[1]); },
+    validEmail(s) { return EMAIL_RE.test((s || '').trim()); },
+
+    // ---------- AI 糾錯：把無法識別的行發給 AI，流式顯示結果，人工核對後一併導入 ----------
+    async startAiFix() {
+      const imp = this.imp;
+      const cfg = await call('get_ai_config');
+      const local = /\/\/(localhost|127\.0\.0\.1)[:/]/.test(cfg.base_url);  // 本地模型（Ollama 等）可以不填 Key
+      if (!cfg.base_url || !cfg.model || (!cfg.has_api_key && !local)) return this.toast(t('import.aiNoConfig'), 'error');
+      const failed = this.impParsed.failed;
+      if (!failed.length) return;
+      this.stopAiFix();
+      const lines = failed.map(f => f.raw);
+      imp.ai = { running: true, error: '', text: '', offset: 0, lines, rows: [], parsed: 0, job: null, showRaw: false };
+      const ai = imp.ai;  // 取響應式代理，後面的修改才會刷新界面
+      try {
+        ai.job = await call('ai_fix_start', lines);
+      } catch (e) {
+        ai.running = false;
+        ai.error = errText(e);
+        return;
+      }
+      const poll = async () => {
+        if (this.imp !== imp || imp.ai !== ai || !ai.running) return;
+        try {
+          const r = await call('ai_fix_poll', ai.job, ai.offset);
+          ai.text += r.delta;
+          ai.offset = r.offset;
+          this.mergeAiRows(ai);
+          if (r.error) ai.error = errText(new Error(r.error));
+          if (r.done) {
+            ai.running = false;
+            if (!ai.error && !ai.rows.length) ai.error = t('import.aiEmpty');
+            return;
+          }
+        } catch (e) {
+          ai.running = false;
+          ai.error = errText(e);
+          return;
+        }
+        ai.timer = setTimeout(poll, 250);
+      };
+      poll();
+    },
+    // 把新解析出的 JSON 行合併進結果表（已經在表裡的行保留用戶的修改）
+    mergeAiRows(ai) {
+      const objs = parseAiLines(ai.text);
+      for (const obj of objs.slice(ai.parsed)) {
+        ai.parsed++;
+        const raw = ai.lines[(parseInt(obj.line, 10) || 0) - 1];
+        if (raw === undefined || ai.rows.some(r => r.raw === raw)) continue;
+        const row = aiRowToImport(obj);
+        const ok = obj.ok !== false && EMAIL_RE.test(row.email || '');
+        ai.rows.push({ raw, row, ok, reason: obj.reason || '', checked: ok });
+      }
+    },
+    stopAiFix() {
+      const ai = this.imp?.ai;
+      if (!ai) return;
+      clearTimeout(ai.timer);
+      if (ai.running && ai.job) call('ai_fix_stop', ai.job).catch(() => {});
+      ai.running = false;
+    },
+    setAllAi(checked) { for (const r of this.impAiRows) r.checked = checked; },
+
+    async doImport() {
+      const i = this.imp;
+      this.prefs.importMode = i.mode;
+      if (i.mode === 'manual') this.prefs.importOrder = [...i.order];
+      // AI 結果裡手動改過的地區代碼可能無效，無效的放進備註
+      let rows = this.impRows.map(({ country, ...r }) => {
+        const code = (country || '').trim().toUpperCase();
+        if (COUNTRY_CODES.includes(code)) r.country = code;
+        else if (code) r.notes = [r.notes, country].filter(Boolean).join(' ');
+        return r;
+      });
+      // 帶國家/地區的行：寫進「國家/地區」類型的自定義列，沒有就自動新增一個
+      if (rows.some(r => r.country)) {
+        let col = this.countryColumns[0];
+        if (!col) {
+          col = { id: 'c' + Date.now().toString(36), name: t('type.country'), type: 'country' };
+          await call('set_sheet_columns', this.sheetId, [...this.currentSheet.columns, col]);
+        }
+        rows = rows.map(({ country, ...r }) => (country ? { ...r, extra: { [col.id]: country } } : r));
+      }
+      const extra = Object.fromEntries(Object.entries(i.extra).filter(([, v]) => v));
+      const r = await call('import_rows', this.sheetId, rows, i.group_id, i.status, i.skipDup, extra);
+      this.closeImport();
+      await this.loadAccounts();
+      await this.refreshState();
+      this.toast(r.skipped ? t('import.doneSkip', { n: r.added, m: r.skipped }) : t('import.done', { n: r.added }));
+    },
     // 導入窗口裡一鍵加一個「顏色標記」列
     async addColorColumn() {
       const cols = [...this.currentSheet.columns, { id: 'c' + Date.now().toString(36), name: t('type.color'), type: 'color' }];
       await call('set_sheet_columns', this.sheetId, cols);
       await this.refreshState();
-    },
-    refreshImportPreview() {
-      clearTimeout(this._impTimer);
-      this._impTimer = setTimeout(async () => {
-        const i = this.imp;
-        if (!i) return;
-        const preview = await call('preview_import', i.text, i.sep, [...i.order]);
-        if (this.imp === i) i.preview = preview;
-      }, 200);
-    },
-    async doImport() {
-      const i = this.imp;
-      this.prefs.importOrder = [...i.order];
-      const extra = Object.fromEntries(Object.entries(i.extra).filter(([, v]) => v));
-      const r = await call('import_accounts', this.sheetId, i.text, i.sep, [...i.order], i.group_id, i.status, i.skipDup, extra);
-      this.imp = null;
-      await this.loadAccounts();
-      await this.refreshState();
-      this.toast(r.skipped ? t('import.doneSkip', { n: r.added, m: r.skipped }) : t('import.done', { n: r.added }));
     },
     buildExport(rows, fmt) {
       if (fmt === 'txt') return rows.map(rowText).join('\n');
@@ -795,7 +1047,7 @@ const app = createApp({
         else if (this.inbox) this.closeInbox();
         else if (this.bulkCol) this.bulkCol = null;
         else if (this.edit) this.edit = null;
-        else if (this.imp) this.imp = null;
+        else if (this.imp) this.closeImport();
         else if (this.groupEdit) this.groupEdit = null;
         else if (this.colEdit) this.colEdit = null;
         else if (this.settings) this.settings = null;
