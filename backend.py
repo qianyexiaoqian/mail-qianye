@@ -15,6 +15,15 @@ import uuid
 
 import pyotp
 
+try:
+    # 用 Windows 系統的證書驗證代替 Python 自帶的：新裝的系統證書庫不全時（根證書按需下載），
+    # Python 會報 CERTIFICATE_VERIFY_FAILED；公司代理裝的根證書也能被信任
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import aifix
 import billionmail
 import mailfetch
