@@ -1,0 +1,86 @@
+"""BillionMail 後台管理客戶端：用管理員賬號登錄面板，按郵箱地址取回登錄密碼。
+
+這樣用戶只需填一次管理員信息，不用給每個郵箱單獨保存密碼。
+面板接口：POST /api/login 拿 JWT；GET /api/mailbox/list?keyword=<郵箱> 返回該郵箱的登錄密碼。
+/api 受「安全入口」保護，所以先訪問一次安全入口路徑拿到 session cookie。
+"""
+import json
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.cookiejar import CookieJar
+
+TIMEOUT = 15
+
+
+class BillionMailAdmin:
+    def __init__(self, panel_url, safe_path="", user="", password="", verify_cert=False):
+        self.base = (panel_url or "").rstrip("/")
+        sp = (safe_path or "").strip().strip("/")
+        self.safe_path = "/" + sp if sp else ""
+        self.user = user
+        self.password = password
+        ctx = ssl.create_default_context()
+        if not verify_cert:  # BillionMail 默認自簽證書
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(CookieJar()),
+            urllib.request.HTTPSHandler(context=ctx),
+        )
+        self.token = None
+
+    def _call(self, method, path, body=None):
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
+        try:
+            with self._opener.open(req, timeout=TIMEOUT) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            try:
+                return json.loads(e.read().decode("utf-8", "replace"))
+            except Exception:
+                raise PermissionError(f"err.admin_http|{e.code}")
+        except (OSError, ValueError) as e:
+            raise ConnectionError(f"err.admin_connect|{e}")
+
+    def login(self):
+        if not self.base:
+            raise ValueError("err.admin_no_url")
+        if self.safe_path:  # 過安全入口，拿 session cookie
+            try:
+                self._opener.open(urllib.request.Request(self.base + self.safe_path), timeout=TIMEOUT)
+            except Exception:
+                pass
+        j = self._call("POST", "/api/login", {"username": self.user, "password": self.password})
+        self.token = (j.get("data") or {}).get("token")
+        if not self.token:
+            raise PermissionError(f"err.admin_login|{j.get('msg') or j.get('message') or j.get('code')}")
+        return self.token
+
+    def get_password(self, email):
+        """返回該郵箱在 BillionMail 的登錄密碼；查不到返回 None。"""
+        if not self.token:
+            self.login()
+        j = self._call("GET", "/api/mailbox/list?keyword=" + urllib.parse.quote(email))
+        if j.get("code") not in (0, None) and not (j.get("data") or {}).get("list"):
+            # token 可能過期，重登一次
+            self.token = None
+            self.login()
+            j = self._call("GET", "/api/mailbox/list?keyword=" + urllib.parse.quote(email))
+        lst = (j.get("data") or {}).get("list") or []
+        for m in lst:
+            if (m.get("username") or "").lower() == email.lower():
+                return m.get("password") or ""
+        return None
+
+    def list_mailboxes(self):
+        """返回所有郵箱地址（測試連接用）。"""
+        if not self.token:
+            self.login()
+        j = self._call("GET", "/api/mailbox/list?page=1&page_size=1")
+        return int((j.get("data") or {}).get("total") or 0)

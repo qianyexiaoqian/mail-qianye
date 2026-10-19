@@ -1,0 +1,564 @@
+"""郵箱管理 - 數據層與前端 API。
+
+所有給前端調用的方法都在 Api 類裡，pywebview 通過 js_api 暴露，
+開發模式下 devserver.py 通過 HTTP 暴露同一個類。
+"""
+import functools
+import json
+import os
+import re
+import sqlite3
+import sys
+import threading
+import time
+
+import pyotp
+
+import billionmail
+import mailfetch
+import vault
+
+STATUSES = ["正常", "待驗證", "異常", "封禁", "停用"]
+FIELDS = ["email", "password", "totp_secret", "recovery_email", "recovery_password",
+          "oauth_client_id", "oauth_token", "phone", "notes"]
+SECRET_FIELDS = ("password", "totp_secret", "recovery_password", "oauth_token")  # 加密存儲的字段
+# 微軟 OAuth2（帶令牌）的輔助郵箱：oauth_client_id = 應用 ClientID，oauth_token = refresh token
+
+
+def app_dir():
+    """數據文件放在 exe 旁邊（便攜），源碼運行時放在腳本旁邊。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resource_dir():
+    """打包後的靜態資源目錄。"""
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sheets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    columns TEXT NOT NULL DEFAULT '[]',
+    sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '#4f7cff',
+    sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sheet_id INTEGER NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    password TEXT NOT NULL DEFAULT '',
+    totp_secret TEXT NOT NULL DEFAULT '',
+    recovery_email TEXT NOT NULL DEFAULT '',
+    recovery_password TEXT NOT NULL DEFAULT '',
+    oauth_client_id TEXT NOT NULL DEFAULT '',
+    oauth_token TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    group_id INTEGER,
+    status TEXT NOT NULL DEFAULT '正常',
+    notes TEXT NOT NULL DEFAULT '',
+    extra TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_accounts_sheet ON accounts(sheet_id);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+
+def clean_secret(secret):
+    secret = (secret or "").strip()
+    if secret.lower().startswith("otpauth://"):
+        from urllib.parse import parse_qs, urlparse
+
+        secret = (parse_qs(urlparse(secret).query).get("secret") or [""])[0]
+    return re.sub(r"[\s-]", "", secret).upper()
+
+
+def totp_now(secret):
+    s = clean_secret(secret)
+    if not s:
+        return ""
+    try:
+        return pyotp.TOTP(s).now()
+    except Exception:
+        return "密鑰無效"
+
+
+class Store:
+    def __init__(self, path):
+        self.lock = threading.Lock()
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA)
+        self._migrate()
+        if not self.conn.execute("SELECT 1 FROM sheets LIMIT 1").fetchone():
+            self.conn.execute("INSERT INTO sheets(name) VALUES ('默認列表')")
+        self.conn.commit()
+
+    def _migrate(self):
+        """為舊版數據庫補上新增的列。"""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(accounts)")}
+        for col in ("oauth_client_id", "oauth_token"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        self.conn.commit()
+
+    def query(self, sql, args=()):
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def execute(self, sql, args=()):
+        with self.lock:
+            cur = self.conn.execute(sql, args)
+            self.conn.commit()
+            return cur.lastrowid
+
+    def executemany(self, sql, rows):
+        with self.lock:
+            self.conn.executemany(sql, rows)
+            self.conn.commit()
+
+    def get_setting(self, key):
+        rows = self.query("SELECT value FROM settings WHERE key=?", (key,))
+        return rows[0]["value"] if rows else None
+
+
+def need_unlock(fn):
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if self._cipher is None:
+            raise PermissionError("err.locked")
+        return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
+COLUMN_TYPES = ("text", "color", "country", "emoji", "image")
+
+
+def normalize_column(col):
+    """舊版列只是名字，extra 以名字為 key，所以 id 就用名字。"""
+    if isinstance(col, str):
+        return {"id": col, "name": col.strip(), "type": "text"}
+    name = (col.get("name") or "").strip()
+    return {
+        "id": col.get("id") or name,
+        "name": name,
+        "type": col.get("type") if col.get("type") in COLUMN_TYPES else "text",
+    }
+
+
+def split_line(line, sep):
+    if sep != "auto":
+        return [p.strip() for p in line.split(sep)]
+    for candidate in ("----", "\t", "|", ",", ";"):
+        if candidate in line:
+            return [p.strip() for p in line.split(candidate)]
+    # 最後嘗試冒號（email:password 格式）
+    if line.count(":") >= 1:
+        return [p.strip() for p in line.split(":")]
+    return [line.strip()]
+
+
+class Api:
+    def __init__(self, db_path=None):
+        self.db_path = db_path or os.path.join(app_dir(), "mail_data.db")
+        self._store = Store(self.db_path)
+        self._window = None  # 由 main.py 注入，用於文件對話框
+        self._cipher = None  # 解鎖後才有
+        self._admin = None  # BillionMail 後台客戶端（登錄一次後復用）
+        self._pw_cache = {}  # 管理員模式下解析到的郵箱密碼緩存（內存，鎖定即清）
+
+    # ---------- 主密碼 ----------
+    def get_lock_state(self):
+        return {"has_password": self._store.get_setting("verifier") is not None, "unlocked": self._cipher is not None}
+
+    def setup_password(self, password):
+        """首次設置主密碼，並把已有的明文數據加密。"""
+        if self._store.get_setting("verifier") is not None:
+            raise ValueError("err.already_set")
+        self._rekey(None, password)
+
+    def unlock(self, password):
+        salt = self._store.get_setting("kdf_salt")
+        if salt is None:
+            raise ValueError("err.not_set")
+        n = int(self._store.get_setting("kdf_n") or vault.SCRYPT_N)
+        cipher = vault.Cipher(vault.derive_key(password or "", salt, n))
+        if not cipher.check(self._store.get_setting("verifier")):
+            time.sleep(0.5)  # 減慢暴力嘗試
+            raise vault.WrongPassword("err.wrong_password")
+        self._cipher = cipher
+
+    def lock(self):
+        self._cipher = None
+        self._admin = None
+        self._pw_cache = {}
+
+    @need_unlock
+    def change_password(self, old_password, new_password):
+        old = self._cipher
+        self.unlock(old_password)  # 校驗舊密碼
+        self._rekey(old, new_password)
+
+    def _rekey(self, old, password):
+        """用新主密碼重新加密所有敏感字段，在一個事務裡完成。old 為 None 表示現有數據是明文。"""
+        if len(password or "") < 4:
+            raise ValueError("err.pw_short")
+        salt = vault.new_salt()
+        cipher = vault.Cipher(vault.derive_key(password, salt))
+        settings = {"kdf_salt": salt, "kdf_n": str(vault.SCRYPT_N), "verifier": cipher.encrypt(vault.VERIFIER)}
+        mail_cfg = json.loads(self._store.get_setting("mail_config") or "{}")
+        changed = False
+        for key in ("admin_password",):  # 配置裡的密碼也跟著換密鑰
+            if mail_cfg.get(key):
+                plain = old.decrypt(mail_cfg[key]) if old else mail_cfg[key]
+                mail_cfg[key] = cipher.encrypt(plain)
+                changed = True
+        if changed:
+            settings["mail_config"] = json.dumps(mail_cfg, ensure_ascii=False)
+        st = self._store
+        with st.lock:
+            conn = st.conn
+            rows = conn.execute(f"SELECT id, {', '.join(SECRET_FIELDS)} FROM accounts").fetchall()
+            updates = []
+            for r in rows:
+                plain = [old.decrypt(r[f]) if old else r[f] for f in SECRET_FIELDS]
+                updates.append([cipher.encrypt(v) for v in plain] + [r["id"]])
+            sets = ", ".join(f"{f}=?" for f in SECRET_FIELDS)
+            try:
+                conn.executemany(f"UPDATE accounts SET {sets} WHERE id=?", updates)
+                conn.executemany("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", list(settings.items()))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self._cipher = cipher
+
+    def _encrypt_row(self, values):
+        for f in SECRET_FIELDS:
+            values[f] = self._cipher.encrypt(values.get(f, ""))
+        return values
+
+    def _decrypt_row(self, row):
+        for f in SECRET_FIELDS:
+            row[f] = self._cipher.decrypt(row[f])
+        return row
+
+    # ---------- 界面偏好（不需要解鎖，鎖屏也要用主題和語言） ----------
+    def get_prefs(self):
+        return json.loads(self._store.get_setting("ui_prefs") or "{}")
+
+    def set_prefs(self, prefs):
+        self._store.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('ui_prefs', ?)", (json.dumps(prefs, ensure_ascii=False),)
+        )
+
+    def set_window_title(self, title):
+        if self._window is not None:
+            self._window.title = title
+
+    # ---------- 基礎 ----------
+    def get_meta(self):
+        return {
+            "statuses": STATUSES,
+            "fields": FIELDS,
+            "db_path": self.db_path,
+        }
+
+    @need_unlock
+    def get_state(self):
+        sheets = self._store.query(
+            "SELECT s.*, (SELECT COUNT(*) FROM accounts a WHERE a.sheet_id = s.id) AS count "
+            "FROM sheets s ORDER BY sort, id"
+        )
+        for s in sheets:
+            s["columns"] = [normalize_column(c) for c in json.loads(s["columns"] or "[]")]
+        groups = self._store.query(
+            "SELECT g.*, (SELECT COUNT(*) FROM accounts a WHERE a.group_id = g.id) AS count "
+            "FROM groups g ORDER BY sort, id"
+        )
+        return {"sheets": sheets, "groups": groups}
+
+    # ---------- 列表（表格） ----------
+    @need_unlock
+    def add_sheet(self, name):
+        name = (name or "").strip() or "新列表"
+        return self._store.execute("INSERT INTO sheets(name) VALUES (?)", (name,))
+
+    @need_unlock
+    def rename_sheet(self, sheet_id, name):
+        self._store.execute("UPDATE sheets SET name=? WHERE id=?", (name.strip(), sheet_id))
+
+    @need_unlock
+    def set_sheet_columns(self, sheet_id, columns):
+        cols = [normalize_column(c) for c in columns]
+        cols = [c for c in cols if c["name"]]
+        self._store.execute("UPDATE sheets SET columns=? WHERE id=?", (json.dumps(cols, ensure_ascii=False), sheet_id))
+
+    @need_unlock
+    def delete_sheet(self, sheet_id):
+        if len(self._store.query("SELECT id FROM sheets")) <= 1:
+            raise ValueError("err.keep_one_sheet")
+        self._store.execute("DELETE FROM accounts WHERE sheet_id=?", (sheet_id,))
+        self._store.execute("DELETE FROM sheets WHERE id=?", (sheet_id,))
+
+    # ---------- 分組 ----------
+    @need_unlock
+    def add_group(self, name, color="#4f7cff"):
+        name = (name or "").strip() or "新分組"
+        return self._store.execute("INSERT INTO groups(name, color) VALUES (?, ?)", (name, color))
+
+    @need_unlock
+    def update_group(self, group_id, name, color):
+        self._store.execute("UPDATE groups SET name=?, color=? WHERE id=?", (name.strip(), color, group_id))
+
+    @need_unlock
+    def delete_group(self, group_id):
+        self._store.execute("UPDATE accounts SET group_id=NULL WHERE group_id=?", (group_id,))
+        self._store.execute("DELETE FROM groups WHERE id=?", (group_id,))
+
+    # ---------- 賬號 ----------
+    @need_unlock
+    def list_accounts(self, sheet_id):
+        rows = self._store.query("SELECT * FROM accounts WHERE sheet_id=? ORDER BY id DESC", (sheet_id,))
+        for r in rows:
+            r["extra"] = json.loads(r["extra"] or "{}")
+            self._decrypt_row(r)
+        return rows
+
+    @need_unlock
+    def save_account(self, data):
+        now = int(time.time())
+        values = {f: (data.get(f) or "").strip() for f in FIELDS}
+        values["notes"] = (data.get("notes") or "").rstrip()
+        values["totp_secret"] = clean_secret(values["totp_secret"])
+        self._encrypt_row(values)
+        status = data.get("status") or "正常"
+        group_id = data.get("group_id") or None
+        extra = json.dumps(data.get("extra") or {}, ensure_ascii=False)
+        if data.get("id"):
+            sets = ", ".join(f"{f}=?" for f in FIELDS)
+            self._store.execute(
+                f"UPDATE accounts SET {sets}, status=?, group_id=?, extra=?, updated_at=? WHERE id=?",
+                [values[f] for f in FIELDS] + [status, group_id, extra, now, data["id"]],
+            )
+            return data["id"]
+        cols = ", ".join(FIELDS)
+        marks = ", ".join("?" for _ in FIELDS)
+        return self._store.execute(
+            f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
+            f"VALUES (?, {marks}, ?, ?, ?, ?, ?)",
+            [data["sheet_id"]] + [values[f] for f in FIELDS] + [status, group_id, extra, now, now],
+        )
+
+    @need_unlock
+    def delete_accounts(self, ids):
+        self._bulk("DELETE FROM accounts WHERE id IN ({})", ids)
+
+    @need_unlock
+    def set_group(self, ids, group_id):
+        self._bulk("UPDATE accounts SET group_id=? WHERE id IN ({})", ids, [group_id or None])
+
+    @need_unlock
+    def set_status(self, ids, status):
+        self._bulk("UPDATE accounts SET status=? WHERE id IN ({})", ids, [status])
+
+    @need_unlock
+    def move_accounts(self, ids, sheet_id):
+        self._bulk("UPDATE accounts SET sheet_id=? WHERE id IN ({})", ids, [sheet_id])
+
+    @need_unlock
+    def set_extra(self, ids, key, value):
+        ids = [int(i) for i in ids]
+        if not ids:
+            return
+        now = int(time.time())
+        st = self._store
+        with st.lock:
+            rows = st.conn.execute(f"SELECT id, extra FROM accounts WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+            updates = []
+            for r in rows:
+                extra = json.loads(r["extra"] or "{}")
+                if value in (None, ""):
+                    extra.pop(key, None)
+                else:
+                    extra[key] = value
+                updates.append((json.dumps(extra, ensure_ascii=False), now, r["id"]))
+            st.conn.executemany("UPDATE accounts SET extra=?, updated_at=? WHERE id=?", updates)
+            st.conn.commit()
+
+    def _bulk(self, sql, ids, head=()):
+        ids = [int(i) for i in ids]
+        if not ids:
+            return
+        self._store.execute(sql.format(",".join("?" for _ in ids)), list(head) + ids)
+
+    # ---------- 自建郵箱收信（IMAP，BillionMail / Dovecot） ----------
+    _MAIL_DEFAULTS = {"host": "", "port": 993, "ssl": True, "verify_cert": False, "domains": "", "limit": 15,
+                     # BillionMail 後台管理員模式：只填後台信息，自動取每個郵箱的密碼
+                     "admin_enabled": False, "panel_url": "", "safe_path": "", "admin_user": "", "admin_verify_cert": False}
+    _MAIL_SECRETS = ("admin_password",)
+
+    def _mail_config(self, with_secret=False):
+        cfg = {**self._MAIL_DEFAULTS, **json.loads(self._store.get_setting("mail_config") or "{}")}
+        for key in self._MAIL_SECRETS:
+            enc = cfg.pop(key, "")
+            cfg["has_" + key] = bool(enc)
+            if with_secret:
+                cfg[key] = self._cipher.decrypt(enc) if enc else ""
+        return cfg
+
+    @need_unlock
+    def get_mail_config(self):
+        return self._mail_config()
+
+    @need_unlock
+    def set_mail_config(self, cfg):
+        """密碼字段：None / 不傳 = 保持原值，"" = 清除。"""
+        old = json.loads(self._store.get_setting("mail_config") or "{}")
+        new = {k: cfg.get(k, v) for k, v in self._MAIL_DEFAULTS.items()}
+        new["host"] = (new["host"] or "").strip()
+        new["port"] = int(new["port"] or 993)
+        new["panel_url"] = (new["panel_url"] or "").strip()
+        for key in self._MAIL_SECRETS:
+            pw = cfg.get(key)
+            if pw is None:
+                new[key] = old.get(key, "")
+            else:
+                new[key] = self._cipher.encrypt(pw) if pw else ""
+        self._store.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('mail_config', ?)", (json.dumps(new, ensure_ascii=False),)
+        )
+        self._admin = None  # 配置變了，重建後台連接
+        self._pw_cache = {}
+
+    @need_unlock
+    def test_mail_server(self, cfg=None):
+        return mailfetch.test_server({**self._mail_config(), **(cfg or {})})
+
+    def _admin_client(self, cfg, fresh=False):
+        if fresh or self._admin is None:
+            self._admin = billionmail.BillionMailAdmin(
+                cfg.get("panel_url"), cfg.get("safe_path"), cfg.get("admin_user"),
+                cfg.get("admin_password"), cfg.get("admin_verify_cert"))
+        return self._admin
+
+    def _resolve_password(self, cfg, address):
+        """管理員模式：從 BillionMail 後台取回該郵箱的登錄密碼（帶緩存）。"""
+        if address in self._pw_cache:
+            return self._pw_cache[address]
+        pw = self._admin_client(cfg).get_password(address)
+        if not pw:
+            raise ValueError("err.admin_no_mailbox")
+        self._pw_cache[address] = pw
+        return pw
+
+    @need_unlock
+    def test_billionmail_admin(self, cfg=None):
+        """測試後台登錄，返回郵箱數量。"""
+        full = {**self._mail_config(with_secret=True), **(cfg or {})}
+        if cfg is not None and cfg.get("admin_password") in (None, ""):
+            # 測試時未重新輸入密碼 → 用已保存的
+            full["admin_password"] = self._mail_config(with_secret=True).get("admin_password", "")
+        client = billionmail.BillionMailAdmin(
+            full.get("panel_url"), full.get("safe_path"), full.get("admin_user"),
+            full.get("admin_password"), full.get("admin_verify_cert"))
+        return {"total": client.list_mailboxes()}
+
+    @need_unlock
+    def fetch_mail(self, account_id, which="recovery"):
+        """讀取某個賬號的輔助郵箱（which="recovery"）或主郵箱（which="email"）的最新郵件。"""
+        rows = self._store.query("SELECT * FROM accounts WHERE id=?", (int(account_id),))
+        if not rows:
+            raise ValueError("not found")
+        a = self._decrypt_row(rows[0])
+        if which == "email":
+            address, password = a["email"], a["password"]
+        else:
+            address, password = a["recovery_email"], a["recovery_password"]
+        cfg = self._mail_config(with_secret=True)
+        # 管理員模式：自建郵箱沒保存密碼時，自動從 BillionMail 後台取回
+        if not mailfetch.is_microsoft(address) and not password and cfg.get("admin_enabled") and cfg.get("panel_url"):
+            password = self._resolve_password(cfg, address)
+        box = mailfetch.build_mailbox(cfg, address, password, a.get("oauth_client_id", ""), a.get("oauth_token", ""))
+        return {"address": address, "provider": "microsoft" if mailfetch.is_microsoft(address) else "self",
+                "messages": mailfetch.fetch(box, int(cfg.get("limit") or 15))}
+
+    # ---------- 2FA ----------
+    def totp_codes(self, secrets):
+        """批量生成驗證碼，返回 {secret: code}。"""
+        return {s: totp_now(s) for s in set(secrets) if s}
+
+    # ---------- 導入 / 導出 ----------
+    @need_unlock
+    def preview_import(self, text, sep, order):
+        rows = []
+        for line in (text or "").splitlines():
+            if not line.strip():
+                continue
+            parts = split_line(line.strip(), sep)
+            row = {}
+            for i, field in enumerate(order):
+                if field != "skip" and i < len(parts):
+                    row[field] = parts[i]
+            if row.get("email"):
+                rows.append(row)
+        return rows
+
+    @need_unlock
+    def import_accounts(self, sheet_id, text, sep, order, group_id=None, status="正常", skip_dup=True, extra=None):
+        """extra：所有導入行共用的自定義列值，例如顏色標記、國家。"""
+        extra_json = json.dumps({k: v for k, v in (extra or {}).items() if v}, ensure_ascii=False)
+        rows = self.preview_import(text, sep, order)
+        existing = set()
+        if skip_dup:
+            existing = {r["email"].lower() for r in self._store.query("SELECT email FROM accounts WHERE sheet_id=?", (sheet_id,))}
+        now = int(time.time())
+        batch = []
+        skipped = 0
+        for r in rows:
+            key = r["email"].lower()
+            if key in existing:
+                skipped += 1
+                continue
+            existing.add(key)
+            r["totp_secret"] = clean_secret(r.get("totp_secret", ""))
+            self._encrypt_row(r)
+            batch.append([sheet_id] + [r.get(f, "") for f in FIELDS] + [status, group_id or None, extra_json, now, now])
+        cols = ", ".join(FIELDS)
+        marks = ", ".join("?" for _ in FIELDS)
+        self._store.executemany(
+            f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
+            f"VALUES (?, {marks}, ?, ?, ?, ?, ?)",
+            batch,
+        )
+        return {"added": len(batch), "skipped": skipped}
+
+    @need_unlock
+    def save_export(self, filename, content):
+        """彈出保存對話框寫文件。沒有窗口（開發模式）時返回 None，由前端走瀏覽器下載。"""
+        if self._window is None:
+            return None
+        import webview
+
+        ext = os.path.splitext(filename)[1].lstrip(".") or "txt"
+        save = getattr(getattr(webview, "FileDialog", None), "SAVE", None) or webview.SAVE_DIALOG
+        result = self._window.create_file_dialog(save, save_filename=filename, file_types=(f"{ext.upper()} (*.{ext})",))
+        if not result:
+            return {"cancelled": True}
+        path = result if isinstance(result, str) else result[0]
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        return {"path": path}

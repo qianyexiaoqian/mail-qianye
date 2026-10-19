@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mail Manager</title>
+<link rel="stylesheet" href="style.css">
+<script src="vue.global.prod.js"></script>
+<script src="i18n.js"></script>
+<script src="countries.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+  <!-- ========== 鎖屏 ========== -->
+  <div v-if="ready && !lock.unlocked" class="lock-screen">
+    <form class="lock-card" @submit.prevent="submitLock">
+      <div class="lock-icon">🔒</div>
+      <h2>{{ lock.has_password ? t('lock.unlockTitle') : t('lock.setupTitle') }}</h2>
+      <p v-if="!lock.has_password" class="muted">{{ t('lock.setupDesc') }}<br><b class="danger-text">{{ t('lock.setupWarn') }}</b></p>
+      <input ref="lockInput" type="password" v-model="lockForm.pw" :placeholder="lock.has_password ? t('lock.password') : t('lock.newPassword')" autofocus>
+      <input v-if="!lock.has_password" type="password" v-model="lockForm.pw2" :placeholder="t('lock.confirm')">
+      <div class="lock-err">{{ lockForm.err }}</div>
+      <button class="btn primary block" :disabled="lockForm.busy">{{ lockForm.busy ? t('lock.wait') : (lock.has_password ? t('lock.unlock') : t('lock.setupBtn')) }}</button>
+      <div class="lock-foot muted">
+        <select v-model="prefs.lang"><option v-for="l in languages" :value="l.code">{{ l.label }}</option></select>
+        <select v-model="prefs.theme">
+          <option value="light">{{ t('theme.light') }}</option><option value="dark">{{ t('theme.dark') }}</option><option value="system">{{ t('theme.system') }}</option>
+        </select>
+        <span :title="meta.db_path">{{ dbName }}</span>
+      </div>
+    </form>
+  </div>
+
+  <template v-if="lock.unlocked">
+  <!-- ========== 側邊欄 ========== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span>✉ {{ t('app.title') }}</span>
+      <button class="icon-btn" :title="t('settings.theme')" @click="toggleTheme">{{ isDark ? '☀' : '☾' }}</button>
+    </div>
+
+    <div class="side-title">
+      <span>{{ t('side.sheets') }}</span>
+      <button class="icon-btn" :title="t('sheet.add')" @click="addSheet">＋</button>
+    </div>
+    <ul class="side-list">
+      <li v-for="s in sheets" :key="s.id" :class="{active: s.id === sheetId}" @click="selectSheet(s.id)"
+          @dblclick="renameSheet(s)" :title="t('sheet.dblclick')">
+        <span class="name">{{ sheetName(s) }}</span>
+        <span class="count">{{ s.count }}</span>
+        <span class="row-tools">
+          <button class="icon-btn sm" :title="t('sheet.rename')" @click.stop="renameSheet(s)">✎</button>
+          <button class="icon-btn sm" :title="t('sheet.delete')" @click.stop="deleteSheet(s)">✕</button>
+        </span>
+      </li>
+    </ul>
+
+    <div class="side-title">
+      <span>{{ t('side.groups') }}</span>
+      <button class="icon-btn" :title="t('group.manage')" @click="openGroups">⚙</button>
+    </div>
+    <ul class="side-list">
+      <li :class="{active: filters.group === ''}" @click="filters.group = ''">
+        <span class="dot" style="background:#9aa4b2"></span><span class="name">{{ t('group.all') }}</span>
+        <span class="count">{{ accounts.length }}</span>
+      </li>
+      <li v-for="g in groups" :key="g.id" :class="{active: filters.group === g.id}" @click="filters.group = g.id">
+        <span class="dot" :style="{background: g.color}"></span><span class="name">{{ g.name }}</span>
+        <span class="count">{{ groupCounts[g.id] || 0 }}</span>
+      </li>
+      <li :class="{active: filters.group === 'none'}" @click="filters.group = 'none'">
+        <span class="dot hollow"></span><span class="name">{{ t('group.none') }}</span>
+        <span class="count">{{ groupCounts.none || 0 }}</span>
+      </li>
+    </ul>
+
+    <div class="side-actions">
+      <button class="side-btn" @click="lockNow" :title="t('lock.lockTip')">🔒 {{ t('lock.lock') }}</button>
+      <button class="side-btn" @click="openSettings">⚙ {{ t('settings.title') }}</button>
+    </div>
+    <div class="side-foot" :title="meta.db_path">{{ t('side.dataFile') }}：{{ dbName }}</div>
+  </aside>
+
+  <!-- ========== 主區域 ========== -->
+  <main class="main">
+    <header class="toolbar">
+      <div class="search">
+        <span class="search-icon">⌕</span>
+        <input ref="searchInput" v-model="search" :placeholder="t('search.placeholder')">
+        <button v-if="search" class="icon-btn sm" @click="search = ''">✕</button>
+      </div>
+      <button class="btn primary" @click="openEdit()">{{ t('btn.add') }}</button>
+      <button class="btn" @click="openImport">{{ t('btn.import') }}</button>
+      <div class="dropdown" @mouseleave="exportMenu = false">
+        <button class="btn" @click="exportMenu = !exportMenu">{{ t('btn.export') }} ▾</button>
+        <div v-if="exportMenu" class="menu">
+          <div class="menu-item" @click="doExport('csv')">{{ t('export.csv', {scope: exportScope}) }}</div>
+          <div class="menu-item" @click="doExport('txt')">{{ t('export.txt', {scope: exportScope}) }}</div>
+        </div>
+      </div>
+      <button class="btn" @click="openColumns">{{ t('btn.columns') }}</button>
+    </header>
+
+    <div class="filters">
+      <select v-model="filters.status">
+        <option value="">{{ t('filter.allStatus') }}</option>
+        <option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}（{{ statusCounts[s] || 0 }}）</option>
+      </select>
+      <select v-model="filters.domain">
+        <option value="">{{ t('filter.allDomains') }}</option>
+        <option v-for="d in domains" :value="d.name">{{ d.name }}（{{ d.count }}）</option>
+      </select>
+      <select v-model="filters.twofa">
+        <option value="">{{ t('filter.twofaAny') }}</option>
+        <option value="yes">{{ t('filter.twofaYes') }}</option>
+        <option value="no">{{ t('filter.twofaNo') }}</option>
+      </select>
+      <select v-model="filters.recovery">
+        <option value="">{{ t('filter.recAny') }}</option>
+        <option value="yes">{{ t('filter.recYes') }}</option>
+        <option value="no">{{ t('filter.recNo') }}</option>
+      </select>
+      <div v-if="countryColumns.length" class="country-filter" :class="{active: filters.country.trim()}">
+        <span class="muted">🌐</span>
+        <input v-model="filters.country" :placeholder="t('filter.country')" :title="t('filter.countryTip')">
+        <span v-if="filters.country.trim() && !countryFilterCodes.length" class="muted">{{ t('filter.countryNoMatch') }}</span>
+        <span v-for="code in countryFilterCodes" :key="code" class="chip" :title="countryName(code)">{{ flag(code) }} {{ code }}</span>
+        <button v-if="filters.country" class="icon-btn sm" @click="filters.country = ''">✕</button>
+      </div>
+      <label class="check"><input type="checkbox" v-model="showPwd"> {{ t('filter.showPwd') }}</label>
+      <button v-if="hasFilter" class="link" @click="resetFilters">{{ t('filter.clear') }}</button>
+      <span class="spacer"></span>
+      <span class="totp-timer" :class="{warn: remaining <= 5}" :title="t('filter.timerTip')">
+        <svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15" class="bg"/><circle cx="18" cy="18" r="15" class="fg"
+          :style="{strokeDashoffset: 94.25 * (1 - remaining / 30)}"/></svg>{{ remaining }}s
+      </span>
+    </div>
+
+    <div v-if="selectedIds.length" class="bulkbar">
+      <span v-html="t('bulk.selected', {n: '<b>' + selectedIds.length + '</b>'})"></span>
+      <select @change="bulkGroup($event)">
+        <option value="">{{ t('bulk.setGroup') }}</option>
+        <option v-for="g in groups" :value="g.id">{{ g.name }}</option>
+        <option value="none">{{ t('bulk.ungroup') }}</option>
+      </select>
+      <select @change="bulkStatus($event)">
+        <option value="">{{ t('bulk.setStatus') }}</option>
+        <option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option>
+      </select>
+      <select v-if="sheets.length > 1" @change="bulkMove($event)">
+        <option value="">{{ t('bulk.move') }}</option>
+        <option v-for="s in sheets" v-show="s.id !== sheetId" :value="s.id">{{ sheetName(s) }}</option>
+      </select>
+      <select v-if="currentSheet.columns.length" @change="openBulkColumn($event)">
+        <option value="">{{ t('bulk.setColumn') }}</option>
+        <option v-for="c in currentSheet.columns" :value="c.id">{{ c.name }}</option>
+      </select>
+      <button class="btn sm" @click="copySelected">{{ t('bulk.copy') }}</button>
+      <button class="btn sm danger" @click="bulkDelete">{{ t('btn.delete') }}</button>
+      <button class="link" @click="selected = {}">{{ t('bulk.unselect') }}</button>
+    </div>
+
+    <div class="table-wrap" ref="tableWrap" @scroll="onTableScroll">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" :checked="allPageSelected" @change="togglePage($event)"></th>
+            <th v-for="c in visibleColumns" :key="c.key" :class="['col-' + c.key, {sortable: c.sort}]" @click="c.sort && toggleSort(c.key)">
+              {{ c.label }}<span v-if="sort.key === c.key" class="sort">{{ sort.dir > 0 ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-actions">{{ t('col.actions') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="a in paged" :key="a.id" :class="{selected: selected[a.id]}" @dblclick="openEdit(a)">
+            <td class="col-check"><input type="checkbox" v-model="selected[a.id]"></td>
+            <td v-for="c in visibleColumns" :key="c.key" :class="'col-' + c.key">
+              <template v-if="c.key === 'email'">
+                <span class="copy mono" @click="copy(a.email, t('copy.email'))">{{ a.email }}</span>
+                <button v-if="mailEligible(a, 'email')" class="icon-btn sm inbox-btn" :title="t('mail.open')" @click="openInbox(a, 'email')">📥</button>
+              </template>
+              <template v-else-if="c.key === 'password' || c.key === 'recovery_password'">
+                <span v-if="a[c.key]" class="copy mono" @click="copy(a[c.key], t('copy.password'), true)">{{ showPwd || revealed[a.id] ? a[c.key] : '••••••••' }}</span>
+                <button v-if="a[c.key] && !showPwd" class="icon-btn sm eye" @click="revealed[a.id] = !revealed[a.id]">{{ revealed[a.id] ? '◉' : '◎' }}</button>
+              </template>
+              <template v-else-if="c.key === 'totp'">
+                <span v-if="a.totp_secret" class="code copy" :class="{warn: remaining <= 5}" @click="copy(codes[a.totp_secret], t('copy.code'))"
+                      :title="t('row.secret', {s: a.totp_secret})">{{ fmtCode(codes[a.totp_secret]) }}</span>
+                <span v-else class="muted">—</span>
+              </template>
+              <template v-else-if="c.key === 'recovery_email' || c.key === 'phone'">
+                <span v-if="a[c.key]" class="copy mono" @click="copy(a[c.key])">{{ a[c.key] }}</span>
+                <button v-if="c.key === 'recovery_email' && mailEligible(a, 'recovery')" class="icon-btn sm inbox-btn"
+                        :title="t('mail.open')" @click="openInbox(a, 'recovery')">📥</button>
+              </template>
+              <template v-else-if="c.key === 'group'">
+                <span v-if="groupMap[a.group_id]" class="tag" :style="tagStyle(groupMap[a.group_id].color)">{{ groupMap[a.group_id].name }}</span>
+              </template>
+              <template v-else-if="c.key === 'status'">
+                <span class="status" :class="'st-' + statusIndex(a.status)">{{ statusLabel(a.status) }}</span>
+              </template>
+              <template v-else-if="c.key === 'notes'">
+                <span class="notes" :title="a.notes" @click="openEdit(a, 'notes')">{{ a.notes || '' }}<span v-if="!a.notes" class="muted add-note">{{ t('row.addNote') }}</span></span>
+              </template>
+              <template v-else-if="c.key === 'updated'">
+                <span class="muted">{{ fmtDate(a.updated_at) }}</span>
+              </template>
+              <template v-else-if="c.custom">
+                <cell-view :col="c.col" :value="a.extra[c.col.id]" @click="onCustomCell(a, c.col, $event)"></cell-view>
+              </template>
+            </td>
+            <td class="col-actions">
+              <button class="icon-btn sm" :title="t('row.copyRow')" @click="copyRow(a)">⧉</button>
+              <button class="icon-btn sm" :title="t('row.edit')" @click="openEdit(a)">✎</button>
+              <button class="icon-btn sm" :title="t('row.delete')" @click="deleteOne(a)">✕</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-if="!filtered.length" class="empty">{{ accounts.length ? t('empty.filtered') : t('empty.sheet') }}</div>
+    </div>
+
+    <footer class="pager">
+      <span class="info">{{ pageInfo }}</span>
+      <button class="page-btn" :disabled="page <= 1" @click="page--">‹ {{ t('pager.prev') }}</button>
+      <template v-for="p in pageButtons">
+        <span v-if="p === '…'" class="muted">…</span>
+        <button v-else class="page-btn" :class="{active: p === page}" @click="page = p">{{ p }}</button>
+      </template>
+      <button class="page-btn" :disabled="page >= pageCount" @click="page++">{{ t('pager.next') }} ›</button>
+      <select v-model.number="pageSize">
+        <option v-for="n in [20, 50, 100, 200]" :value="n">{{ t('pager.perPage', {n}) }}</option>
+      </select>
+      <span class="muted">{{ t('pager.goto') }}</span>
+      <input class="goto" type="number" min="1" :max="pageCount" :value="page" @change="gotoPage($event)">
+    </footer>
+  </main>
+
+  <!-- ========== 單元格浮層編輯 ========== -->
+  <div v-if="pop" ref="popEl" class="popover" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+    <div class="popover-title">{{ pop.col.name }} · {{ pop.account.email }}</div>
+    <cell-editor :col="pop.col" :model-value="pop.account.extra[pop.col.id] || ''" @update:model-value="onPopInput" @pick="pop = null" :autofocus="true"></cell-editor>
+  </div>
+
+  <!-- ========== 收件箱 ========== -->
+  <div v-if="inbox" class="modal-mask" @mousedown.self="closeInbox">
+    <div class="modal wide inbox">
+      <div class="inbox-head">
+        <h3>📥 <span class="mono">{{ inbox.address }}</span></h3>
+        <span class="spacer"></span>
+        <label class="check"><input type="checkbox" v-model="prefs.mailAuto" @change="restartInboxTimer"> {{ t('mail.auto') }}</label>
+        <label class="check"><input type="checkbox" v-model="prefs.mailAutoCopy"> {{ t('mail.autoCopy') }}</label>
+        <button class="btn sm" :disabled="inbox.loading" @click="fetchInbox(); restartInboxTimer()">{{ inbox.loading ? t('mail.loading') : '⟳ ' + t('mail.refresh') }}</button>
+        <button class="icon-btn" @click="closeInbox">✕</button>
+      </div>
+      <div class="muted inbox-status">
+        <span v-if="inbox.updated">{{ t('mail.updated', {time: fmtTime(inbox.updated)}) }}</span>
+        <span v-if="inbox.loading" class="spinner"></span>
+      </div>
+      <div v-if="inbox.error" class="inbox-error">{{ inbox.error }}</div>
+
+      <div v-if="latestCode" class="latest-code">
+        <div class="muted">{{ t('mail.latest') }} · {{ latestCode.msg.from_name || latestCode.msg.from_addr }} · {{ timeAgo(latestCode.msg.date) }}</div>
+        <div class="latest-row">
+          <span class="big-code copy" @click="copy(latestCode.code, t('copy.code'))">{{ latestCode.code }}</span>
+          <button class="btn primary sm" @click="copy(latestCode.code, t('copy.code'))">{{ t('mail.copy') }}</button>
+        </div>
+        <div class="muted ellipsis">{{ latestCode.msg.subject }}</div>
+      </div>
+      <div v-else-if="inbox.messages.length && !inbox.loading" class="muted" style="margin:8px 0">{{ t('mail.noCode') }}</div>
+
+      <div class="mail-list">
+        <div v-for="m in inbox.messages" :key="m.id" class="mail-item" :class="{open: inbox.open[m.id], fresh: inbox.fresh[m.id]}">
+          <div class="mail-row" @click="inbox.open[m.id] = !inbox.open[m.id]">
+            <span class="mail-time muted" :title="fmtDate(m.date)">{{ timeAgo(m.date) }}</span>
+            <span class="mail-from ellipsis" :title="m.from_addr">{{ m.from_name || m.from_addr }}</span>
+            <span class="mail-subject ellipsis">
+              <span v-if="m.folder !== 'INBOX'" class="tag junk">{{ t('mail.junk') }}</span>{{ m.subject }}
+            </span>
+            <span v-for="code in m.codes" class="chip code-chip copy" @click.stop="copy(code, t('copy.code'))">{{ code }}</span>
+          </div>
+          <div v-if="inbox.open[m.id]" class="mail-body">
+            <div class="editor-row" style="margin-bottom:6px">
+              <span class="muted ellipsis">{{ m.from_addr }} · {{ fmtDate(m.date) }}</span>
+              <span class="spacer"></span>
+              <button v-if="m.html" class="btn sm" @click="inbox.html[m.id] = !inbox.html[m.id]">{{ inbox.html[m.id] ? t('mail.showText') : t('mail.showHtml') }}</button>
+            </div>
+            <iframe v-if="inbox.html[m.id]" class="mail-html" sandbox="" :srcdoc="safeHtml(m.html)"></iframe>
+            <pre v-else class="mail-text">{{ m.text }}</pre>
+          </div>
+        </div>
+        <div v-if="!inbox.messages.length && !inbox.loading && !inbox.error" class="empty">{{ t('mail.empty') }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 批量設置列值 ========== -->
+  <div v-if="bulkCol" class="modal-mask" @mousedown.self="bulkCol = null">
+    <div class="modal">
+      <h3>{{ bulkCol.col.name }}</h3>
+      <cell-editor :col="bulkCol.col" v-model="bulkCol.value"></cell-editor>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn" @click="bulkCol = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" @click="applyBulkColumn">{{ t('cell.applyTo', {n: selectedIds.length}) }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 新增 / 編輯 ========== -->
+  <div v-if="edit" class="modal-mask" @mousedown.self="edit = null">
+    <div class="modal wide">
+      <h3>{{ edit.id ? t('edit.titleEdit') : t('edit.titleNew') }}</h3>
+      <div class="form-grid">
+        <label>{{ t('col.email') }} *<input v-model="edit.email" ref="editFirst" class="mono" placeholder="name@example.com"></label>
+        <label>{{ t('col.password') }}
+          <div class="input-row"><input v-model="edit.password" class="mono"><button class="btn sm" @click="edit.password = genPassword()" :title="t('edit.randomTip')">{{ t('edit.random') }}</button></div>
+        </label>
+        <label>{{ t('col.totp_secret') }}
+          <div class="input-row"><input v-model="edit.totp_secret" class="mono" :placeholder="t('edit.totpPlaceholder')">
+            <span v-if="editCode" class="code sm">{{ fmtCode(editCode) }}</span></div>
+        </label>
+        <label>{{ t('col.recovery_email') }}<input v-model="edit.recovery_email" class="mono"></label>
+        <label>{{ t('col.recovery_password') }}<input v-model="edit.recovery_password" class="mono"></label>
+        <label>{{ t('col.oauth_client_id') }} <span class="muted">{{ t('edit.oauthHint') }}</span><input v-model="edit.oauth_client_id" class="mono" placeholder="client id"></label>
+        <label>{{ t('col.oauth_token') }}<input v-model="edit.oauth_token" class="mono" placeholder="refresh token"></label>
+        <label>{{ t('col.phone') }}<input v-model="edit.phone" class="mono"></label>
+        <label>{{ t('col.group') }}
+          <select v-model="edit.group_id"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
+        </label>
+        <label>{{ t('col.status') }}
+          <select v-model="edit.status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>
+        </label>
+        <div v-for="col in currentSheet.columns" :key="col.id" class="field" :class="{full: col.type !== 'text'}">{{ col.name }}
+          <cell-editor :col="col" v-model="edit.extra[col.id]"></cell-editor>
+        </div>
+        <label class="full">{{ t('col.notes') }}<textarea v-model="edit.notes" ref="editNotes" rows="4" :placeholder="t('edit.notesPlaceholder')"></textarea></label>
+      </div>
+      <div class="modal-foot">
+        <span class="muted" v-if="edit.id">{{ t('edit.meta', {c: fmtDate(edit.created_at), u: fmtDate(edit.updated_at)}) }}</span>
+        <span class="spacer"></span>
+        <button class="btn" @click="edit = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" @click="saveEdit">{{ t('btn.saveShortcut') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 批量導入 ========== -->
+  <div v-if="imp" class="modal-mask" @mousedown.self="imp = null">
+    <div class="modal wide">
+      <h3>{{ t('import.title', {name: sheetName(currentSheet)}) }}</h3>
+      <textarea v-model="imp.text" rows="9" class="mono" :placeholder="t('import.placeholder')"></textarea>
+      <div class="import-opts">
+        <label>{{ t('import.sep') }}
+          <select v-model="imp.sep">
+            <option value="auto">{{ t('import.auto') }}</option><option value="----">----</option><option value="|">|</option>
+            <option value="&#9;">Tab</option><option value=",">,</option><option value=":">:</option><option value=";">;</option>
+          </select>
+        </label>
+        <label>{{ t('import.group') }}
+          <select v-model="imp.group_id"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
+        </label>
+        <label>{{ t('import.status') }}
+          <select v-model="imp.status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>
+        </label>
+        <label class="check"><input type="checkbox" v-model="imp.skipDup"> {{ t('import.skipDup') }}</label>
+      </div>
+      <div class="import-marks">
+        <div v-for="col in [...colorColumns, ...countryColumns]" :key="col.id" class="import-mark">
+          <span class="muted">{{ col.name }}：</span>
+          <cell-editor :col="col" v-model="imp.extra[col.id]"></cell-editor>
+        </div>
+        <button v-if="!colorColumns.length" class="link" @click="addColorColumn">{{ t('import.addColorCol') }}</button>
+      </div>
+      <div class="import-presets">
+        <span class="muted">{{ t('import.preset') }}</span>
+        <button v-for="p in importPresets" :key="p.name" class="btn sm" @click="applyPreset(p.order)">{{ p.name }}</button>
+      </div>
+      <div class="import-order">
+        <span class="muted">{{ t('import.order') }}</span>
+        <select v-for="(f, i) in imp.order" :key="i" v-model="imp.order[i]">
+          <option v-for="opt in importFields" :value="opt">{{ t('import.colN', {i: i + 1, f: t('col.' + opt)}) }}</option>
+        </select>
+      </div>
+      <div class="preview" v-if="imp.preview.length">
+        <div class="muted">{{ t('import.preview', {n: imp.preview.length}) }}</div>
+        <table class="grid mini">
+          <tr><th v-for="f in imp.order.filter(x => x !== 'skip')">{{ t('col.' + f) }}</th></tr>
+          <tr v-for="(r, i) in imp.preview.slice(0, 5)" :key="i"><td v-for="f in imp.order.filter(x => x !== 'skip')" class="mono">{{ r[f] }}</td></tr>
+        </table>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn" @click="imp = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" :disabled="!imp.preview.length" @click="doImport">{{ t('import.submit', {n: imp.preview.length}) }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 分組管理 ========== -->
+  <div v-if="groupEdit" class="modal-mask" @mousedown.self="groupEdit = null">
+    <div class="modal">
+      <h3>{{ t('group.manage') }}</h3>
+      <div v-for="g in groupEdit" :key="g.id || g.tmp" class="group-row">
+        <input type="color" v-model="g.color">
+        <input v-model="g.name" :placeholder="t('group.name')">
+        <button class="icon-btn" :title="t('group.delete')" @click="removeGroup(g)">✕</button>
+      </div>
+      <button class="btn sm" @click="groupEdit.push({tmp: Date.now(), name: '', color: randomColor()})">{{ t('group.add') }}</button>
+      <div class="modal-foot">
+        <span class="muted">{{ t('group.hint') }}</span><span class="spacer"></span>
+        <button class="btn" @click="groupEdit = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" @click="saveGroups">{{ t('btn.save') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 列設置 ========== -->
+  <div v-if="colEdit" class="modal-mask" @mousedown.self="colEdit = null">
+    <div class="modal">
+      <h3>{{ t('columns.title') }}</h3>
+      <div class="muted">{{ t('columns.visible') }}</div>
+      <div class="col-toggles">
+        <label v-for="c in baseColumns" :key="c.key" class="check"><input type="checkbox" v-model="colEdit.visible[c.key]" :disabled="c.key === 'email'"> {{ t('col.' + c.key) }}</label>
+      </div>
+      <div class="section-title">{{ t('columns.custom', {name: sheetName(currentSheet)}) }}</div>
+      <div v-for="(c, i) in colEdit.custom" :key="c.id" class="group-row">
+        <input v-model="c.name" :placeholder="t('columns.namePlaceholder')">
+        <select v-model="c.type" :title="t('columns.type')">
+          <option v-for="ty in columnTypes" :value="ty">{{ t('type.' + ty) }}</option>
+        </select>
+        <button class="icon-btn" :title="t('columns.up')" :disabled="i === 0" @click="moveColumn(i, -1)">↑</button>
+        <button class="icon-btn" :title="t('columns.down')" :disabled="i === colEdit.custom.length - 1" @click="moveColumn(i, 1)">↓</button>
+        <button class="icon-btn" :title="t('btn.delete')" @click="colEdit.custom.splice(i, 1)">✕</button>
+      </div>
+      <button class="btn sm" @click="colEdit.custom.push({id: 'c' + Date.now().toString(36), name: '', type: 'text'})">{{ t('columns.add') }}</button>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn" @click="colEdit = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" @click="saveColumns">{{ t('btn.save') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 設置 ========== -->
+  <div v-if="settings" class="modal-mask" @mousedown.self="settings = null">
+    <div class="modal">
+      <h3>{{ t('settings.title') }}</h3>
+      <div class="form-grid">
+        <label>{{ t('settings.theme') }}
+          <select v-model="prefs.theme">
+            <option value="light">{{ t('theme.light') }}</option><option value="dark">{{ t('theme.dark') }}</option><option value="system">{{ t('theme.system') }}</option>
+          </select>
+        </label>
+        <label>{{ t('settings.language') }}
+          <select v-model="prefs.lang"><option v-for="l in languages" :value="l.code">{{ l.label }}</option></select>
+        </label>
+        <label class="full">{{ t('settings.autoLock') }}
+          <select v-model.number="prefs.autoLock">
+            <option :value="0">{{ t('autolock.never') }}</option>
+            <option v-for="n in [5, 15, 30]" :value="n">{{ t('autolock.min', {n}) }}</option>
+            <option :value="60">{{ t('autolock.hour') }}</option>
+          </select>
+        </label>
+      </div>
+      <div class="section-title">{{ t('mail.section') }}</div>
+      <div v-if="settings.mail" class="form-grid">
+        <label>{{ t('mail.host') }}<input v-model="settings.mail.host" placeholder="mail.example.com"></label>
+        <label>{{ t('mail.port') }}<input v-model.number="settings.mail.port" type="number"></label>
+        <label class="check"><input type="checkbox" v-model="settings.mail.ssl"> SSL/TLS</label>
+        <label class="check"><input type="checkbox" v-model="settings.mail.verify_cert"> {{ t('mail.verify') }}</label>
+        <label class="full">{{ t('mail.domains') }}<input v-model="settings.mail.domains" :placeholder="t('mail.domainsPh')"></label>
+        <div class="full muted mail-hint">{{ t('mail.selfHint') }}</div>
+        <div class="full editor-row">
+          <button class="btn sm" :disabled="settings.testing || !settings.mail.host" @click="testMailServer">{{ settings.testing ? t('mail.testing') : t('mail.test') }}</button>
+          <span :class="settings.testOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.testMsg }}</span>
+        </div>
+      </div>
+
+      <div class="section-title">{{ t('admin.section') }}</div>
+      <div v-if="settings.mail" class="form-grid">
+        <label class="full check"><input type="checkbox" v-model="settings.mail.admin_enabled"> {{ t('admin.enable') }}</label>
+        <template v-if="settings.mail.admin_enabled">
+          <label class="full">{{ t('admin.url') }}<input v-model="settings.mail.panel_url" placeholder="https://mail.example.com"></label>
+          <label>{{ t('admin.safePath') }}<input v-model="settings.mail.safe_path" placeholder="/xxxxxx"></label>
+          <label class="check"><input type="checkbox" v-model="settings.mail.admin_verify_cert"> {{ t('mail.verify') }}</label>
+          <label>{{ t('admin.user') }}<input v-model="settings.mail.admin_user"></label>
+          <label>{{ t('admin.pw') }}<input type="password" v-model="settings.mail.admin_password" :placeholder="settings.mail.has_admin_password ? t('mail.masterPwSet') : ''"></label>
+          <div class="full muted mail-hint">{{ t('admin.hint') }}</div>
+          <div class="full editor-row">
+            <button class="btn sm" :disabled="settings.adminTesting || !settings.mail.panel_url" @click="testAdmin">{{ settings.adminTesting ? t('mail.testing') : t('admin.test') }}</button>
+            <span :class="settings.adminOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.adminMsg }}</span>
+          </div>
+        </template>
+      </div>
+
+      <div class="section-title">{{ t('settings.changePw') }}</div>
+      <div class="form-grid one">
+        <input type="password" v-model="settings.old" :placeholder="t('settings.oldPw')">
+        <input type="password" v-model="settings.pw" :placeholder="t('settings.newPw')">
+        <input type="password" v-model="settings.pw2" :placeholder="t('settings.newPw2')">
+      </div>
+      <div class="lock-err">{{ settings.err }}</div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn" @click="settings = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" :disabled="settings.busy" @click="saveSettings">{{ settings.busy ? t('settings.encrypting') : t('btn.save') }}</button>
+      </div>
+    </div>
+  </div>
+  </template>
+
+  <!-- ========== 通用輸入 / 確認 ========== -->
+  <div v-if="dialog" class="modal-mask" @mousedown.self="dialog.resolve(null)">
+    <div class="modal small">
+      <h3>{{ dialog.title }}</h3>
+      <p v-if="dialog.message" class="dialog-msg">{{ dialog.message }}</p>
+      <input v-if="dialog.input" v-model="dialog.value" ref="dialogInput" @keydown.enter="dialog.resolve(dialog.value)">
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn" @click="dialog.resolve(null)">{{ t('btn.cancel') }}</button>
+        <button class="btn" :class="dialog.danger ? 'danger' : 'primary'" @click="dialog.resolve(dialog.input ? dialog.value : true)">{{ dialog.ok || t('btn.ok') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toasts"><div v-for="toast in toasts" :key="toast.id" class="toast" :class="toast.type">{{ toast.text }}</div></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
