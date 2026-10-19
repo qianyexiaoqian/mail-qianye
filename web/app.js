@@ -106,6 +106,8 @@ const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, recove
   group: 100, status: 80, notes: 240, updated: 140 };
 const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, image: 70 };
 const MIN_COL_WIDTH = 50;
+const INBOX_PAGE = 15;  // 收件箱每次刷新取的數量，「加載更多」每次多取 50 封
+const INBOX_MORE = 50;
 const DEFAULT_FILTERS = { group: '', status: '', domain: '', twofa: '', recovery: '', country: '' };
 const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize: 20, page: 1, scroll: 0, sheetId: null,
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
@@ -525,10 +527,11 @@ const app = createApp({
     openInbox(a, which) {
       this.closeInbox();
       this.inbox = { account: a, which, address: which === 'email' ? a.email : a.recovery_email, messages: [], loading: false,
-        error: '', updated: 0, open: {}, html: {}, fresh: {}, seen: null };
+        error: '', updated: 0, open: {}, html: {}, fresh: {}, seen: null, total: 0, totals: {} };
       this.fetchInbox();
       this.restartInboxTimer();
     },
+    loadMoreMail(all) { this.fetchInbox(all ? 0 : this.inbox.messages.length + INBOX_MORE); },
     restartInboxTimer() {
       clearInterval(this._inboxTimer);
       if (this.inbox && this.prefs.mailAuto) this._inboxTimer = setInterval(() => this.fetchInbox(), 5000);
@@ -537,15 +540,17 @@ const app = createApp({
       clearInterval(this._inboxTimer);
       this.inbox = null;
     },
-    async fetchInbox() {
+    // limit 不傳：取最新的一批，合併進已加載的列表（自動刷新用）；傳了（加載更多 / 0 = 全部）：整個替換
+    async fetchInbox(limit) {
       const box = this.inbox;
       if (!box || box.loading) return;
       box.loading = true;
+      const more = limit !== undefined;
       try {
-        const r = await call('fetch_mail', box.account.id, box.which);
+        const r = await call('fetch_mail', box.account.id, box.which, more ? limit : INBOX_PAGE);
         if (this.inbox !== box) return;
-        // 自動刷新時發現新郵件：高亮，帶驗證碼的提示（可自動複製）
-        if (box.seen) {
+        // 自動刷新時發現新郵件：高亮，帶驗證碼的提示（可自動複製）。加載更早的郵件不算新郵件
+        if (box.seen && !more) {
           const fresh = r.messages.filter(m => !box.seen.has(m.id));
           for (const m of fresh) box.fresh[m.id] = true;
           const withCode = fresh.find(m => m.codes.length);
@@ -554,8 +559,15 @@ const app = createApp({
             else this.toast(t('mail.newCode', { code: withCode.codes[0] }));
           }
         }
-        box.seen = new Set(r.messages.map(m => m.id));
-        box.messages = r.messages;
+        box.seen = new Set([...(box.seen || []), ...r.messages.map(m => m.id)]);
+        if (more) box.messages = r.messages;
+        else {
+          const byId = new Map(box.messages.map(m => [m.id, m]));
+          for (const m of r.messages) byId.set(m.id, m);
+          box.messages = [...byId.values()].sort((x, y) => y.date - x.date);
+        }
+        box.total = r.total ?? box.messages.length;
+        box.totals = r.totals || {};
         box.error = '';
       } catch (e) {
         if (this.inbox === box) box.error = errText(e);

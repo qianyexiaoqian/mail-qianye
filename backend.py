@@ -609,8 +609,9 @@ class Api:
         return {"created": created, "skipped": skipped, "failed": failed}
 
     @need_unlock
-    def fetch_mail(self, account_id, which="recovery"):
-        """讀取某個賬號的輔助郵箱（which="recovery"）或主郵箱（which="email"）的最新郵件。"""
+    def fetch_mail(self, account_id, which="recovery", limit=None):
+        """讀取某個賬號的輔助郵箱（which="recovery"）或主郵箱（which="email"）的最新郵件。
+        limit：取最新多少封（INBOX + Junk 合計），0 = 全部；返回 total = 兩個文件夾的郵件總數。"""
         rows = self._store.query("SELECT * FROM accounts WHERE id=?", (int(account_id),))
         if not rows:
             raise ValueError("not found")
@@ -620,15 +621,16 @@ class Api:
         else:
             address, password = a["recovery_email"], a["recovery_password"]
         cfg = self._mail_config(with_secret=True)
-        limit = int(cfg.get("limit") or 15)
+        limit = int(cfg.get("limit") or 15) if limit is None else int(limit)
+        limit = mailfetch.MAX_MESSAGES if limit <= 0 else min(limit, mailfetch.MAX_MESSAGES)
         if mailfetch.is_microsoft(address):
             box = mailfetch.build_mailbox(cfg, address, password, a.get("oauth_client_id", ""), a.get("oauth_token", ""))
-            return {"address": address, "provider": "microsoft", "messages": mailfetch.fetch(box, limit)}
-        messages, used = self._fetch_self(cfg, address, password, limit)
+            return {"address": address, "provider": "microsoft", **mailfetch.fetch(box, limit)}
+        result, used = self._fetch_self(cfg, address, password, limit)
         if used != password:  # 保存的密碼不對或沒有：把後台取回的正確密碼存下來，下次不會先登錄失敗（避免觸發 fail2ban）
             field = "password" if which == "email" else "recovery_password"
             self.update_fields([{"id": a["id"], "fields": {field: used}}])
-        return {"address": address, "provider": "self", "messages": messages}
+        return {"address": address, "provider": "self", **result}
 
     def _fetch_self(self, cfg, address, saved_password, limit):
         """自建郵箱收信：密碼優先用保存的，沒有或登錄失敗就用管理員從後台取回的；
@@ -643,19 +645,19 @@ class Api:
                    "auth": "basic", "user": address, "password": password}
             try:
                 try:
-                    messages = mailfetch.fetch(box, limit)
+                    result = mailfetch.fetch(box, limit)
                 except PermissionError:
                     # 保存的密碼不對（或後台改過密碼）：用管理員重新取回的再試一次
                     fresh = self._resolve_password(cfg, address, fresh=True)
                     if fresh == password:
                         raise
                     password = box["password"] = fresh
-                    messages = mailfetch.fetch(box, limit)
+                    result = mailfetch.fetch(box, limit)
             except ConnectionError as e:  # 這台服務器連不上：換下一個候選
                 last_error = e
                 continue
             self._save_domain_cache(good_host={domain: host})
-            return messages, password
+            return result, password
         raise last_error or ConnectionError("err.mail_connect")
 
     # ---------- AI 糾錯（OpenAI 兼容接口） ----------

@@ -330,6 +330,7 @@
       </div>
       <div class="muted inbox-status">
         <span v-if="inbox.updated">{{ t('mail.updated', {time: fmtTime(inbox.updated)}) }}</span>
+        <span v-if="inbox.total">· {{ t('mail.count', {n: inbox.messages.length, total: inbox.total, inbox: inbox.totals.INBOX || 0, junk: inbox.totals.Junk || 0}) }}</span>
         <span v-if="inbox.loading" class="spinner"></span>
       </div>
       <div v-if="inbox.error" class="inbox-error">{{ inbox.error }}</div>
@@ -362,9 +363,15 @@
             </div>
             <iframe v-if="inbox.html[m.id]" class="mail-html" sandbox="" :srcdoc="safeHtml(m.html)"></iframe>
             <pre v-else class="mail-text">{{ m.text }}</pre>
+            <div v-if="m.truncated" class="muted mail-hint">{{ t('mail.truncated') }}</div>
           </div>
         </div>
         <div v-if="!inbox.messages.length && !inbox.loading && !inbox.error" class="empty">{{ t('mail.empty') }}</div>
+      </div>
+      <div v-if="inbox.total > inbox.messages.length" class="mail-more">
+        <span class="muted">{{ t('mail.moreLeft', {n: inbox.total - inbox.messages.length}) }}</span>
+        <button class="btn sm" :disabled="inbox.loading" @click="loadMoreMail(false)">{{ t('mail.loadMore') }}</button>
+        <button class="btn sm" :disabled="inbox.loading" @click="loadMoreMail(true)">{{ t('mail.loadAll') }}</button>
       </div>
     </div>
   </div>

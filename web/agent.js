@@ -129,7 +129,7 @@ const AGENT_TOOLS = [
   agentFn('fetch_mail', '收取郵箱的最新郵件（自建 BillionMail / 微軟郵箱），返回發件人、標題、時間、提取到的驗證碼和正文摘要', {
     email: { type: 'string', description: '主郵箱地址（當前列表裡的）' },
     which: { type: 'string', enum: ['recovery', 'email'], description: 'recovery=它的輔助郵箱（默認），email=主郵箱本身' },
-    limit: { type: 'integer', description: '默認 5' },
+    limit: { type: 'integer', description: '取最新多少封，默認 5，最多 50（返回 total = 郵件總數）' },
   }, ['email']),
   agentFn('copy_to_clipboard', '在本地把郵箱數據複製到剪貼板（可以包含密碼，不經過 AI）', {
     filter: AGENT_FILTER, fields: { type: 'array', items: { type: 'string' }, description: '默認 email,password,totp_secret,recovery_email' },
@@ -1061,9 +1061,9 @@ const AgentMixin = {
       const a = this.accounts.find(x => x.email.toLowerCase() === String(args.email || '').trim().toLowerCase());
       if (!a) return { error: `no account "${args.email}" in the current sheet` };
       const which = args.which === 'email' ? 'email' : 'recovery';
-      const r = await call('fetch_mail', a.id, which);
-      const limit = Math.min(20, Math.max(1, parseInt(args.limit, 10) || 5));
-      return { address: r.address, messages: r.messages.slice(0, limit).map(m => ({
+      const limit = Math.min(50, Math.max(1, parseInt(args.limit, 10) || 5));
+      const r = await call('fetch_mail', a.id, which, limit);
+      return { address: r.address, total: r.total, messages: r.messages.slice(0, limit).map(m => ({
         from: m.from_name ? `${m.from_name} <${m.from_addr}>` : m.from_addr, subject: m.subject, date: this.fmtDate(m.date),
         folder: m.folder, codes: m.codes, text: (m.text || '').slice(0, 600) })) };
     },

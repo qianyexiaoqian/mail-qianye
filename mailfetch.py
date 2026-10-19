@@ -11,6 +11,9 @@ from email.utils import parseaddr, parsedate_to_datetime
 TIMEOUT = 12
 MAX_TEXT = 20000
 MAX_HTML = 300000
+MAX_MESSAGES = 500  # 「全部」最多取這麼多封
+FULL_COUNT = 30  # 最新的這麼多封保留完整內容（HTML），更早的只留正文摘要，避免一次傳太多數據
+OLD_TEXT = 3000
 FOLDERS = ("INBOX", "Junk")  # 驗證碼郵件經常進垃圾箱
 
 CODE_KEYWORDS = (
@@ -160,13 +163,16 @@ def _xoauth2(user, token):
 
 
 def _read_messages(conn, limit):
-    messages = []
+    """返回 (最新 limit 封郵件, 各文件夾郵件總數)。"""
+    messages, totals = [], {}
     for folder in FOLDERS:
         typ, _ = conn.select(folder, readonly=True)
         if typ != "OK":
             continue
         typ, data = conn.uid("search", None, "ALL")
-        uids = data[0].split()[-limit:] if typ == "OK" and data and data[0] else []
+        all_uids = data[0].split() if typ == "OK" and data and data[0] else []
+        totals[folder] = len(all_uids)
+        uids = all_uids[-limit:]
         if not uids:
             continue
         typ, data = conn.uid("fetch", b",".join(uids), "(BODY.PEEK[])")
@@ -188,11 +194,16 @@ def _read_messages(conn, limit):
                 "codes": extract_codes(subject, text), "text": text[:MAX_TEXT], "html": htm[:MAX_HTML],
             })
     messages.sort(key=lambda m: m["date"], reverse=True)
-    return messages[:limit]
+    messages = messages[:limit]
+    for m in messages[FULL_COUNT:]:
+        m["truncated"] = bool(m["html"]) or len(m["text"]) > OLD_TEXT
+        m["html"] = ""
+        m["text"] = m["text"][:OLD_TEXT]
+    return messages, totals
 
 
 def fetch(box, limit=15):
-    """box 由 build_mailbox 生成，返回最新郵件列表（新的在前）。"""
+    """返回 {"messages": 最新 limit 封（新的在前）, "total": INBOX + Junk 總數, "totals": 各文件夾數量}。"""
     if box["auth"] == "xoauth2":
         token = _ms_access_token(box["client_id"], box["refresh_token"])
     elif not box.get("password"):
@@ -209,7 +220,8 @@ def fetch(box, limit=15):
                 conn.login(box["user"], box["password"])
         except imaplib.IMAP4.error as e:
             raise PermissionError(f"err.mail_login|{e}")
-        return _read_messages(conn, limit)
+        messages, totals = _read_messages(conn, limit)
+        return {"messages": messages, "total": sum(totals.values()), "totals": totals}
     finally:
         try:
             conn.logout()
