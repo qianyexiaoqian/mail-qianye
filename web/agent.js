@@ -327,7 +327,7 @@ const AgentMixin = {
         selected: this.accounts.filter(a => this.selected[a.id]).length,
         top_domains: this.domains.slice(0, 15),
         self_hosted_domains: this.selfDomains,
-        mail_fetch: { self_hosted_server: !!this.mailCfg?.host, admin_mode: !!this.mailCfg?.admin_enabled },
+        billionmail_configured: !!this.mailCfg?.panel_url,
         can_read_secrets: !!this.prefs.agentSecrets,
         undo_available: this.agent.undo.map(u => ({ id: u.id, label: u.label })).slice(-5),
       };

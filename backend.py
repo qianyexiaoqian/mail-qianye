@@ -428,19 +428,21 @@ class Api:
             return
         self._store.execute(sql.format(",".join("?" for _ in ids)), list(head) + ids)
 
-    # ---------- 自建郵箱收信（IMAP，BillionMail / Dovecot） ----------
-    _MAIL_DEFAULTS = {"host": "", "port": 993, "ssl": True, "verify_cert": False, "domains": "", "limit": 15,
-                     # BillionMail 後台管理員模式：只填後台信息，自動取每個郵箱的密碼
-                     "admin_enabled": False, "panel_url": "", "safe_path": "", "admin_user": "", "admin_verify_cert": False}
+    # ---------- 自建郵箱（BillionMail 後台管理員） ----------
+    # 只需要填後台地址和管理員賬號：域名列表、每個郵箱的密碼、收信服務器都自動獲取
+    _MAIL_DEFAULTS = {"panel_url": "", "safe_path": "", "admin_user": "", "admin_verify_cert": False, "limit": 15}
     _MAIL_SECRETS = ("admin_password",)
 
     def _mail_config(self, with_secret=False):
-        cfg = {**self._MAIL_DEFAULTS, **json.loads(self._store.get_setting("mail_config") or "{}")}
+        saved = json.loads(self._store.get_setting("mail_config") or "{}")
+        cfg = {**self._MAIL_DEFAULTS, **{k: v for k, v in saved.items() if k in self._MAIL_DEFAULTS}}
+        cfg["legacy_host"] = saved.get("host") or ""  # 舊版手填的收信服務器，作為候選之一
         for key in self._MAIL_SECRETS:
-            enc = cfg.pop(key, "")
+            enc = saved.get(key, "")
             cfg["has_" + key] = bool(enc)
             if with_secret:
                 cfg[key] = self._cipher.decrypt(enc) if enc else ""
+        cfg["configured"] = bool(cfg["panel_url"] and cfg["admin_user"] and cfg["has_admin_password"])
         return cfg
 
     @need_unlock
@@ -452,9 +454,13 @@ class Api:
         """密碼字段：None / 不傳 = 保持原值，"" = 清除。"""
         old = json.loads(self._store.get_setting("mail_config") or "{}")
         new = {k: cfg.get(k, v) for k, v in self._MAIL_DEFAULTS.items()}
-        new["host"] = (new["host"] or "").strip()
-        new["port"] = int(new["port"] or 993)
-        new["panel_url"] = (new["panel_url"] or "").strip()
+        new["panel_url"] = (new["panel_url"] or "").strip().rstrip("/")
+        if new["panel_url"] and not new["panel_url"].lower().startswith(("http://", "https://")):
+            new["panel_url"] = "https://" + new["panel_url"]
+        new["safe_path"] = (new["safe_path"] or "").strip()
+        new["admin_user"] = (new["admin_user"] or "").strip()
+        if old.get("host"):
+            new["host"] = old["host"]
         for key in self._MAIL_SECRETS:
             pw = cfg.get(key)
             if pw is None:
@@ -467,10 +473,6 @@ class Api:
         self._admin = None  # 配置變了，重建後台連接
         self._pw_cache = {}
 
-    @need_unlock
-    def test_mail_server(self, cfg=None):
-        return mailfetch.test_server({**self._mail_config(), **(cfg or {})})
-
     def _admin_client(self, cfg, fresh=False):
         if fresh or self._admin is None:
             self._admin = billionmail.BillionMailAdmin(
@@ -478,9 +480,9 @@ class Api:
                 cfg.get("admin_password"), cfg.get("admin_verify_cert"))
         return self._admin
 
-    def _resolve_password(self, cfg, address):
-        """管理員模式：從 BillionMail 後台取回該郵箱的登錄密碼（帶緩存）。"""
-        if address in self._pw_cache:
+    def _resolve_password(self, cfg, address, fresh=False):
+        """從 BillionMail 後台取回該郵箱的登錄密碼（帶緩存）。"""
+        if address in self._pw_cache and not fresh:
             return self._pw_cache[address]
         pw = self._admin_client(cfg).get_password(address)
         if not pw:
@@ -490,7 +492,7 @@ class Api:
 
     @need_unlock
     def test_billionmail_admin(self, cfg=None):
-        """測試後台登錄，返回郵箱數量。"""
+        """測試後台登錄，返回郵箱數量和域名列表（順便刷新域名緩存）。"""
         full = {**self._mail_config(with_secret=True), **(cfg or {})}
         if cfg is not None and cfg.get("admin_password") in (None, ""):
             # 測試時未重新輸入密碼 → 用已保存的
@@ -498,30 +500,57 @@ class Api:
         client = billionmail.BillionMailAdmin(
             full.get("panel_url"), full.get("safe_path"), full.get("admin_user"),
             full.get("admin_password"), full.get("admin_verify_cert"))
-        return {"total": client.list_mailboxes()}
+        total = client.list_mailboxes()
+        domains = client.list_domains()
+        self._save_domain_cache(domains)
+        return {"total": total, "domains": [d["domain"] for d in domains]}
 
-    # ---------- 自動創建自建郵箱（管理員模式） ----------
     def _admin_cfg(self):
         cfg = self._mail_config(with_secret=True)
-        if not (cfg.get("admin_enabled") and cfg.get("panel_url")):
+        if not cfg.get("panel_url"):
             raise ValueError("err.admin_required")
         return cfg
 
+    # 域名緩存（存數據庫）：後台暫時連不上時域名下拉框、收信入口照樣可用
+    def _domain_cache(self):
+        return json.loads(self._store.get_setting("selfmail_cache") or "{}")
+
+    def _save_domain_cache(self, domains=None, good_host=None):
+        cache = self._domain_cache()
+        if domains is not None:
+            cache["domains"] = domains
+        if good_host:
+            cache.setdefault("hosts", {}).update(good_host)
+        self._store.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('selfmail_cache', ?)",
+                            (json.dumps(cache, ensure_ascii=False),))
+
     @need_unlock
-    def selfmail_domains(self):
-        """可用來創建郵箱的域名：BillionMail 後台的域名 + 設置裡填的自建域名。"""
+    def selfmail_domains(self, refresh=True):
+        """自建郵箱的域名列表（來自 BillionMail 後台）。refresh=False 只返回緩存，不連後台。"""
         cfg = self._mail_config(with_secret=True)
-        domains = [d.strip().lower() for d in re.split(r"[\s,，;]+", cfg.get("domains") or "") if d.strip()]
-        admin = bool(cfg.get("admin_enabled") and cfg.get("panel_url"))
         error = ""
-        if admin:
+        if refresh and cfg.get("panel_url"):
             try:
-                for d in self._admin_client(cfg).list_domains():
-                    if d.lower() not in domains:
-                        domains.append(d.lower())
-            except Exception as e:  # 後台連不上也把設置裡的域名返回
+                self._save_domain_cache(self._admin_client(cfg).list_domains())
+            except Exception as e:  # 後台連不上就用上次的緩存
                 error = str(e)
-        return {"domains": domains, "admin": admin, "error": error}
+        domains = [d["domain"] for d in self._domain_cache().get("domains", [])]
+        return {"domains": domains if cfg.get("panel_url") else [], "configured": cfg["configured"], "error": error}
+
+    def _imap_hosts(self, cfg, domain):
+        """收信服務器候選：上次成功的 → 舊版手填的 → 後台域名的郵件服務器（A 記錄）→ 後台地址的主機 → mail.域名。"""
+        from urllib.parse import urlparse
+
+        cache = self._domain_cache()
+        a_record = next((d.get("a_record") for d in cache.get("domains", []) if d.get("domain") == domain), "")
+        hosts = [cache.get("hosts", {}).get(domain), cfg.get("legacy_host"), a_record,
+                 urlparse(cfg.get("panel_url") or "").hostname, f"mail.{domain}"]
+        out = []
+        for h in hosts:
+            h = (h or "").strip().lower()
+            if h and h not in out:
+                out.append(h)
+        return out
 
     @staticmethod
     def _local_part(address):
@@ -591,12 +620,43 @@ class Api:
         else:
             address, password = a["recovery_email"], a["recovery_password"]
         cfg = self._mail_config(with_secret=True)
-        # 管理員模式：自建郵箱沒保存密碼時，自動從 BillionMail 後台取回
-        if not mailfetch.is_microsoft(address) and not password and cfg.get("admin_enabled") and cfg.get("panel_url"):
-            password = self._resolve_password(cfg, address)
-        box = mailfetch.build_mailbox(cfg, address, password, a.get("oauth_client_id", ""), a.get("oauth_token", ""))
-        return {"address": address, "provider": "microsoft" if mailfetch.is_microsoft(address) else "self",
-                "messages": mailfetch.fetch(box, int(cfg.get("limit") or 15))}
+        limit = int(cfg.get("limit") or 15)
+        if mailfetch.is_microsoft(address):
+            box = mailfetch.build_mailbox(cfg, address, password, a.get("oauth_client_id", ""), a.get("oauth_token", ""))
+            return {"address": address, "provider": "microsoft", "messages": mailfetch.fetch(box, limit)}
+        messages, used = self._fetch_self(cfg, address, password, limit)
+        if used != password:  # 保存的密碼不對或沒有：把後台取回的正確密碼存下來，下次不會先登錄失敗（避免觸發 fail2ban）
+            field = "password" if which == "email" else "recovery_password"
+            self.update_fields([{"id": a["id"], "fields": {field: used}}])
+        return {"address": address, "provider": "self", "messages": messages}
+
+    def _fetch_self(self, cfg, address, saved_password, limit):
+        """自建郵箱收信：密碼優先用保存的，沒有或登錄失敗就用管理員從後台取回的；
+        收信服務器依次嘗試候選地址，成功的記下來下次直接用。"""
+        if not cfg.get("panel_url"):
+            raise ValueError("err.admin_required")
+        domain = address.rsplit("@", 1)[-1].lower()
+        password = saved_password or self._resolve_password(cfg, address)
+        last_error = None
+        for host in self._imap_hosts(cfg, domain):
+            box = {"host": host, "port": 993, "ssl": True, "verify_cert": False, "address": address,
+                   "auth": "basic", "user": address, "password": password}
+            try:
+                try:
+                    messages = mailfetch.fetch(box, limit)
+                except PermissionError:
+                    # 保存的密碼不對（或後台改過密碼）：用管理員重新取回的再試一次
+                    fresh = self._resolve_password(cfg, address, fresh=True)
+                    if fresh == password:
+                        raise
+                    password = box["password"] = fresh
+                    messages = mailfetch.fetch(box, limit)
+            except ConnectionError as e:  # 這台服務器連不上：換下一個候選
+                last_error = e
+                continue
+            self._save_domain_cache(good_host={domain: host})
+            return messages, password
+        raise last_error or ConnectionError("err.mail_connect")
 
     # ---------- AI 糾錯（OpenAI 兼容接口） ----------
     _AI_DEFAULTS = {"base_url": aifix.DEFAULT_BASE_URL, "model": aifix.DEFAULT_MODEL, "prompt": ""}

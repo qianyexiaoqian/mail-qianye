@@ -101,17 +101,6 @@ def _connect(cfg):
     return conn
 
 
-def test_server(cfg):
-    conn = _connect(cfg)
-    try:
-        return {"greeting": conn.welcome.decode(errors="replace"), "capabilities": list(conn.capabilities)}
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-
-
 # 微軟個人郵箱常見域名，走 Outlook（outlook.office365.com）
 MS_DOMAINS = {
     "outlook.com", "hotmail.com", "live.com", "msn.com", "hotmail.co.uk", "live.co.uk",
@@ -129,20 +118,12 @@ def is_microsoft(address):
 
 
 def build_mailbox(cfg, address, password, client_id="", token=""):
-    """根據地址域名決定去哪台服務器、用哪種方式登錄。"""
-    if is_microsoft(address):
-        box = {"host": MS_HOST, "port": 993, "ssl": True, "verify_cert": True, "address": address}
-        if token:  # 帶令牌（OAuth2）
-            box.update(auth="xoauth2", client_id=client_id, refresh_token=token)
-        else:  # 僅郵箱+密碼（微軟多數賬號已禁用，作兜底）
-            box.update(auth="basic", user=address, password=password)
-        return box
-    # 自建郵箱（BillionMail / Dovecot）
-    if not cfg.get("host"):
-        raise ValueError("err.mail_no_host")
-    box = {"host": cfg["host"], "port": int(cfg.get("port") or 993), "ssl": cfg.get("ssl", True),
-           "verify_cert": cfg.get("verify_cert", False), "address": address, "auth": "basic",
-           "user": address, "password": password}
+    """微軟郵箱的收信參數（自建郵箱的服務器由 backend 自動查找）。"""
+    box = {"host": MS_HOST, "port": 993, "ssl": True, "verify_cert": True, "address": address}
+    if token:  # 帶令牌（OAuth2）
+        box.update(auth="xoauth2", client_id=client_id, refresh_token=token)
+    else:  # 僅郵箱+密碼（微軟多數賬號已禁用，作兜底）
+        box.update(auth="basic", user=address, password=password)
     return box
 
 

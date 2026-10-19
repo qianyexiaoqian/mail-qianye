@@ -631,35 +631,18 @@
           </select>
         </label>
       </div>
-      <div class="section-title">{{ t('mail.section') }}</div>
-      <div v-if="settings.mail" class="form-grid">
-        <label>{{ t('mail.host') }}<input v-model="settings.mail.host" placeholder="mail.example.com"></label>
-        <label>{{ t('mail.port') }}<input v-model.number="settings.mail.port" type="number"></label>
-        <label class="check"><input type="checkbox" v-model="settings.mail.ssl"> SSL/TLS</label>
-        <label class="check"><input type="checkbox" v-model="settings.mail.verify_cert"> {{ t('mail.verify') }}</label>
-        <label class="full">{{ t('mail.domains') }}<input v-model="settings.mail.domains" :placeholder="t('mail.domainsPh')"></label>
-        <div class="full muted mail-hint">{{ t('mail.selfHint') }}</div>
-        <div class="full editor-row">
-          <button class="btn sm" :disabled="settings.testing || !settings.mail.host" @click="testMailServer">{{ settings.testing ? t('mail.testing') : t('mail.test') }}</button>
-          <span :class="settings.testOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.testMsg }}</span>
-        </div>
-      </div>
-
       <div class="section-title">{{ t('admin.section') }}</div>
       <div v-if="settings.mail" class="form-grid">
-        <label class="full check"><input type="checkbox" v-model="settings.mail.admin_enabled"> {{ t('admin.enable') }}</label>
-        <template v-if="settings.mail.admin_enabled">
-          <label class="full">{{ t('admin.url') }}<input v-model="settings.mail.panel_url" placeholder="https://mail.example.com"></label>
-          <label>{{ t('admin.safePath') }}<input v-model="settings.mail.safe_path" placeholder="/xxxxxx"></label>
-          <label class="check"><input type="checkbox" v-model="settings.mail.admin_verify_cert"> {{ t('mail.verify') }}</label>
-          <label>{{ t('admin.user') }}<input v-model="settings.mail.admin_user"></label>
-          <label>{{ t('admin.pw') }}<input type="password" v-model="settings.mail.admin_password" :placeholder="settings.mail.has_admin_password ? t('mail.masterPwSet') : ''"></label>
-          <div class="full muted mail-hint">{{ t('admin.hint') }}</div>
-          <div class="full editor-row">
-            <button class="btn sm" :disabled="settings.adminTesting || !settings.mail.panel_url" @click="testAdmin">{{ settings.adminTesting ? t('mail.testing') : t('admin.test') }}</button>
-            <span :class="settings.adminOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.adminMsg }}</span>
-          </div>
-        </template>
+        <div class="full muted mail-hint">{{ t('admin.hint') }}</div>
+        <label class="full">{{ t('admin.url') }}<input v-model="settings.mail.panel_url" placeholder="https://mail.example.com"></label>
+        <label>{{ t('admin.safePath') }}<input v-model="settings.mail.safe_path" placeholder="/xxxxxx"></label>
+        <label class="check"><input type="checkbox" v-model="settings.mail.admin_verify_cert"> {{ t('mail.verify') }}</label>
+        <label>{{ t('admin.user') }}<input v-model="settings.mail.admin_user"></label>
+        <label>{{ t('admin.pw') }}<input type="password" v-model="settings.mail.admin_password" :placeholder="settings.mail.has_admin_password ? t('mail.masterPwSet') : ''"></label>
+        <div class="full editor-row">
+          <button class="btn sm" :disabled="settings.adminTesting || !settings.mail.panel_url" @click="testAdmin">{{ settings.adminTesting ? t('mail.testing') : t('admin.test') }}</button>
+          <span :class="settings.adminOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.adminMsg }}</span>
+        </div>
       </div>
 
       <div class="section-title">{{ t('ai.section') }}</div>

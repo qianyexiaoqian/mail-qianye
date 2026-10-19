@@ -405,7 +405,7 @@ const app = createApp({
     },
     async openSettings() {
       this.settings = { old: '', pw: '', pw2: '', err: '', busy: false, mail: null, ai: null,
-        testing: false, testMsg: '', testOk: false, adminTesting: false, adminMsg: '', adminOk: false,
+        adminTesting: false, adminMsg: '', adminOk: false,
         aiTesting: false, aiMsg: '', aiOk: false };
       const [mail, ai] = await Promise.all([call('get_mail_config'), call('get_ai_config')]);
       if (!this.settings) return;
@@ -434,22 +434,12 @@ const app = createApp({
       cfg.admin_password = m.admin_password ? m.admin_password : (has_admin_password ? null : '');
       return cfg;
     },
-    async testMailServer() {
-      const s = this.settings;
-      s.testing = true; s.testMsg = '';
-      try {
-        const r = await call('test_mail_server', this.mailConfigPayload());
-        s.testOk = true;
-        s.testMsg = t('mail.testOk') + ' · ' + r.greeting.replace(/^\* OK\s*/, '').slice(0, 60);
-      } catch (e) { s.testOk = false; s.testMsg = errText(e); }
-      s.testing = false;
-    },
     async testAdmin() {
       const s = this.settings;
       s.adminTesting = true; s.adminMsg = '';
       try {
         const r = await call('test_billionmail_admin', this.mailConfigPayload());
-        s.adminOk = true; s.adminMsg = t('admin.testOk', { n: r.total });
+        s.adminOk = true; s.adminMsg = t('admin.testOk', { n: r.total, d: r.domains.join('、') || '—' });
       } catch (e) { s.adminOk = false; s.adminMsg = errText(e); }
       s.adminTesting = false;
     },
@@ -474,17 +464,13 @@ const app = createApp({
     },
 
     // ---------- 自動創建自建郵箱（BillionMail 管理員模式） ----------
-    // 可選的自建域名：先用設置裡填的「自建域名」立即顯示，後台（BillionMail）的域名列表取到後再合併進來，
-    // 後台連不上也不影響選擇（創建時會提示錯誤）
+    // 自建域名（來自 BillionMail 後台）：先用上次緩存的立即顯示，再連後台刷新；後台連不上也不影響
     loadSelfDomains() {
       const cfg = this.mailCfg;
-      if (!cfg?.admin_enabled || !cfg?.panel_url) { this.selfDomains = []; return; }
-      const configured = (cfg.domains || '').toLowerCase().split(/[\s,，;]+/).filter(Boolean);
-      this.selfDomains = configured;
-      call('selfmail_domains').then(r => {
-        if (this.mailCfg !== cfg) return;
-        this.selfDomains = [...new Set([...configured, ...(r.domains || [])])];
-      }).catch(() => {});
+      if (!cfg?.panel_url) { this.selfDomains = []; return; }
+      const apply = r => { if (this.mailCfg === cfg && r.domains.length) this.selfDomains = r.domains; };
+      call('selfmail_domains', false).then(apply).catch(() => {});
+      call('selfmail_domains', true).then(apply).catch(() => {});
     },
     // 編輯窗口：輔助郵箱類型選「自建 @域名」→ 用主郵箱的用戶名創建郵箱，隨機密碼，自動填入
     async onRecType() {
@@ -533,11 +519,8 @@ const app = createApp({
       if (!address) return false;
       const password = which === 'email' ? a.password : a.recovery_password;
       if (isMicrosoft(address)) return !!(a.oauth_token || password);  // 帶令牌或帶密碼都可嘗試
-      const cfg = this.mailCfg;
-      if (!cfg || !cfg.host) return false;
-      if (!password && !cfg.admin_enabled) return false;
-      const domains = (cfg.domains || '').toLowerCase().split(/[\s,，;]+/).filter(Boolean);
-      return !domains.length || domains.includes(domainOf(address));
+      // 自建郵箱：BillionMail 後台裡的域名才能收信（密碼由管理員自動取回）
+      return !!this.mailCfg?.panel_url && this.selfDomains.includes(domainOf(address));
     },
     openInbox(a, which) {
       this.closeInbox();

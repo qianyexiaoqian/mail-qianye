@@ -100,9 +100,10 @@ class BillionMailAdmin:
         return j
 
     def list_domains(self):
-        """後台裡的所有郵件域名。"""
+        """後台裡的所有郵件域名：[{"domain": "a.com", "a_record": "mail.a.com"}]（a_record 是該域名的郵件服務器）。"""
         j = self._authed("GET", "/api/domains/list?page=1&page_size=200")
-        return [d.get("domain") for d in ((j.get("data") or {}).get("list") or []) if d.get("domain")]
+        return [{"domain": d["domain"].lower(), "a_record": (d.get("a_record") or "").strip()}
+                for d in ((j.get("data") or {}).get("list") or []) if d.get("domain")]
 
     def create_mailbox(self, domain, local_part, password, full_name=""):
         """新建郵箱，成功返回 True；失敗拋出帶後台提示的錯誤。"""
