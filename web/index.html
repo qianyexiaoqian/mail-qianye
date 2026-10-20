@@ -201,7 +201,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(a, ri) in paged" :key="a.id" :class="{selected: selected[a.id]}" @dblclick="openEdit(a)">
+          <tr v-for="(a, ri) in paged" :key="a.id" :class="{selected: selected[a.id]}" @dblclick="openEdit(a, cellField($event))">
             <td class="col-check"><input type="checkbox" v-model="selected[a.id]"></td>
             <td v-for="c in visibleColumns" :key="c.key" :class="['col-' + c.key, c.custom && 'type-' + c.col.type]">
               <template v-if="c.key === 'index'">
@@ -456,15 +456,15 @@
 
   <!-- ========== 新增 / 編輯 ========== -->
   <div v-if="edit" class="modal-mask" @mousedown.self="edit = null">
-    <div class="modal wide">
+    <div class="modal wide" ref="editModal" @keydown="onEditKey">
       <h3>{{ edit.id ? t('edit.titleEdit') : t('edit.titleNew') }}</h3>
       <div class="form-grid">
-        <label>{{ t('col.email') }} *<input v-model="edit.email" ref="editFirst" class="mono" placeholder="name@example.com" :readonly="selfmail && !!edit.id" :title="selfmail ? t('selfmail.emailReadonly') : ''"></label>
+        <label>{{ t('col.email') }} *<input v-model="edit.email" ref="editFirst" data-field="email" class="mono" placeholder="name@example.com" :readonly="selfmail && !!edit.id" :title="selfmail ? t('selfmail.emailReadonly') : ''"></label>
         <label>{{ t('col.password') }}
-          <div class="input-row"><input v-model="edit.password" class="mono"><button class="btn sm" @click="edit.password = genPassword()" :title="t('edit.randomTip')">{{ t('edit.random') }}</button></div>
+          <div class="input-row"><input v-model="edit.password" data-field="password" class="mono"><button class="btn sm" @click="edit.password = genPassword()" :title="t('edit.randomTip')">{{ t('edit.random') }}</button></div>
         </label>
         <label>{{ t('col.totp_secret') }}
-          <div class="input-row"><input v-model="edit.totp_secret" class="mono" :placeholder="t('edit.totpPlaceholder')">
+          <div class="input-row"><input v-model="edit.totp_secret" data-field="totp_secret" class="mono" :placeholder="t('edit.totpPlaceholder')">
             <span v-if="editCode" class="code sm">{{ fmtCode(editCode) }}</span></div>
         </label>
         <label>{{ t('col.recovery_email') }}
@@ -473,24 +473,24 @@
               <option value="">{{ t('selfmail.manual') }}</option>
               <option v-for="d in selfDomains" :key="d" :value="d">{{ t('selfmail.option', {domain: d}) }}</option>
             </select>
-            <input v-model="edit.recovery_email" class="mono" :placeholder="recBusy ? t('selfmail.creating') : ''">
+            <input v-model="edit.recovery_email" data-field="recovery_email" class="mono" :placeholder="recBusy ? t('selfmail.creating') : ''">
           </div>
           <span v-if="selfDomains.length && edit.email && !recType" class="muted rec-hint">{{ t('selfmail.preview', {user: edit.email.split('@')[0]}) }}</span>
         </label>
-        <label>{{ t('col.recovery_password') }}<input v-model="edit.recovery_password" class="mono"></label>
-        <label>{{ t('col.oauth_client_id') }} <span class="muted">{{ t('edit.oauthHint') }}</span><input v-model="edit.oauth_client_id" class="mono" placeholder="client id"></label>
-        <label>{{ t('col.oauth_token') }}<input v-model="edit.oauth_token" class="mono" placeholder="refresh token"></label>
-        <label>{{ t('col.phone') }}<input v-model="edit.phone" class="mono"></label>
+        <label>{{ t('col.recovery_password') }}<input v-model="edit.recovery_password" data-field="recovery_password" class="mono"></label>
+        <label>{{ t('col.oauth_client_id') }} <span class="muted">{{ t('edit.oauthHint') }}</span><input v-model="edit.oauth_client_id" data-field="oauth_client_id" class="mono" placeholder="client id"></label>
+        <label>{{ t('col.oauth_token') }}<input v-model="edit.oauth_token" data-field="oauth_token" class="mono" placeholder="refresh token"></label>
+        <label>{{ t('col.phone') }}<input v-model="edit.phone" data-field="phone" class="mono"></label>
         <label>{{ t('col.group') }}
-          <select v-model="edit.group_id"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
+          <select v-model="edit.group_id" data-field="group"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
         </label>
         <label>{{ t('col.status') }}
-          <select v-model="edit.status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>
+          <select v-model="edit.status" data-field="status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>
         </label>
-        <div v-for="col in currentSheet.columns" :key="col.id" class="field" :class="{full: col.type !== 'text'}">{{ col.name }}
+        <div v-for="col in currentSheet.columns" :key="col.id" class="field" :class="{full: col.type !== 'text'}" :data-field="'x_' + col.id">{{ col.name }}
           <cell-editor :col="col" v-model="edit.extra[col.id]"></cell-editor>
         </div>
-        <label class="full">{{ t('col.notes') }}<textarea v-model="edit.notes" ref="editNotes" rows="4" :placeholder="t('edit.notesPlaceholder')"></textarea></label>
+        <label class="full">{{ t('col.notes') }}<textarea v-model="edit.notes" ref="editNotes" data-field="notes" rows="4" :placeholder="t('edit.notesPlaceholder')"></textarea></label>
       </div>
       <div class="modal-foot">
         <span class="muted" v-if="edit.id">{{ t('edit.meta', {c: fmtDate(edit.created_at), u: fmtDate(edit.updated_at)}) }}</span>

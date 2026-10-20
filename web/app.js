@@ -945,7 +945,38 @@ const app = createApp({
             oauth_client_id: '', oauth_token: '', phone: '', notes: '',
             status: this.meta.statuses[0], group_id: typeof this.filters.group === 'number' ? this.filters.group : null, extra: {} };
       this.refreshEditCode(this.edit.totp_secret);
-      nextTick(() => (focus === 'notes' ? this.$refs.editNotes : this.$refs.editFirst)?.focus());
+      nextTick(() => this.focusEditField(focus));
+    },
+    // 雙擊的是哪一列（td 上的 col-xxx 類）→ 編輯窗口裡對應的字段
+    cellField(e) {
+      const td = e.target.closest('td');
+      const cls = td && [...td.classList].find(c => c.startsWith('col-'));
+      const key = cls ? cls.slice(4) : '';
+      return { totp: 'totp_secret', index: 'email', updated: 'email', check: 'email', actions: 'email' }[key] ?? key;
+    },
+    // 焦點放到對應字段，光標在內容末尾（不全選，避免一按鍵就把原內容覆蓋）
+    focusEditField(field) {
+      const root = this.$refs.editModal;
+      let el = field && root?.querySelector(`[data-field="${field}"]`);
+      if (el && !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {  // 自定義列：取裡面第一個可輸入的控件
+        el = el.querySelector('input:not([type=file]), textarea, select, button');
+      }
+      el = el || this.$refs.editFirst;
+      if (!el) return;
+      el.focus();
+      el.scrollIntoView({ block: 'nearest' });
+      if (el.setSelectionRange && /^(text|search|url|tel|password|)$/.test(el.type || '')) {
+        try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* 有些輸入框不支持 */ }
+      }
+    },
+    // 編輯窗口裡按 Enter 保存：輸入法選字時、國家搜索框選國家時、按鈕上按 Enter 時不觸發；備註裡 Enter 換行，Ctrl+Enter 保存
+    onEditKey(e) {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.defaultPrevented || e.shiftKey || e.altKey) return;
+      const tag = e.target.tagName;
+      if (tag === 'BUTTON') return;
+      if (tag === 'TEXTAREA' && !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      this.saveEdit();
     },
     async saveEdit() {
       if (!this.edit.email.trim()) return this.toast(t('edit.needEmail'), 'error');
