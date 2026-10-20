@@ -297,8 +297,14 @@
             <span>{{ agentToolLabel(tc.name) }}</span>
             <span class="muted ellipsis" :title="tc.summary">{{ tc.summary }}</span>
             <span class="spacer"></span>
+            <span v-if="tc.status === 'running'" class="muted agent-secs">{{ agentSecs(tc.started) }}s</span>
+            <span v-else-if="tc.elapsed >= 2" class="muted agent-secs">{{ tc.elapsed }}s</span>
             <button v-if="tc.undoId && !agent.busy" class="link" @click.stop="agentUndoClick(tc)">↶ {{ t('agent.undo') }}</button>
             <span v-else-if="tc.undone" class="muted">{{ t('agent.undone') }}</span>
+          </div>
+          <div v-if="tc.status === 'running' && tc.progress && tc.progress.total" class="agent-progress">
+            <div class="bar"><div :style="{width: (100 * tc.progress.done / tc.progress.total) + '%'}"></div></div>
+            <span class="muted ellipsis">{{ tc.progress.done }}/{{ tc.progress.total }} · {{ tc.progress.current }}</span>
           </div>
           <div v-if="tc.open" class="agent-detail">
             <div class="muted">{{ t('agent.args') }}</div><pre>{{ agentPretty(tc.args) }}</pre>
@@ -313,9 +319,14 @@
           </div>
         </div>
         <div v-if="m.error" class="inbox-error">{{ m.error }}</div>
-        <span v-if="m.streaming && !m.text && !m.tools.length" class="spinner"></span>
+        <div v-if="m.streaming && !m.text && !m.tools.length" class="agent-thinking muted">
+          <span class="spinner"></span>
+          <span>{{ m.tool ? t('agent.st.preparing', {s: agentToolLabel(m.tool), n: m.toolChars}) : t('agent.st.thinking') }}</span>
+          <span class="agent-secs">{{ agentSecs(m.started) }}s</span>
+        </div>
       </div>
     </div>
+    <div v-if="agent.busy" class="agent-statusbar"><span class="spinner"></span><span class="ellipsis">{{ agentStatusText() }}</span></div>
     <div class="agent-input">
       <textarea ref="agentInput" v-model="agent.input" rows="3" :placeholder="t('agent.placeholder')"
                 @keydown.enter.exact.prevent="agentSend()"></textarea>
@@ -609,12 +620,16 @@
             <input v-if="smCreate.pwMode === 'fixed'" v-model="smCreate.password" class="mono" :placeholder="t('selfmail.pwMin')">
           </div>
         </div>
+        <div v-if="smCreate.busy && smCreate.progress && smCreate.progress.total" class="agent-progress sm-progress">
+          <div class="bar"><div :style="{width: (100 * smCreate.progress.done / smCreate.progress.total) + '%'}"></div></div>
+          <span class="muted ellipsis">{{ smCreate.progress.done }}/{{ smCreate.progress.total }} · {{ smCreate.progress.current }}</span>
+        </div>
         <div class="modal-foot">
           <span class="muted">{{ t('selfmail.createHint') }}</span>
           <span class="spacer"></span>
           <button class="btn" :disabled="smCreate.busy" @click="smCreate = null">{{ t('btn.cancel') }}</button>
           <button class="btn primary" :disabled="smCreate.busy || !smCreate.domain && smCreate.mode === 'random' || !smCreateCount()" @click="doSelfmailCreate">
-            {{ smCreate.busy ? t('selfmail.creating') : t('selfmail.createN', {n: smCreateCount()}) }}
+            {{ smCreate.busy ? (smCreate.progress ? t('selfmail.creatingN', {d: smCreate.progress.done, n: smCreate.progress.total}) : t('selfmail.creating')) : t('selfmail.createN', {n: smCreateCount()}) }}
           </button>
         </div>
       </template>

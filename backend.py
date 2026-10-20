@@ -183,6 +183,8 @@ class Api:
         self._admin = None  # BillionMail 後台客戶端（登錄一次後復用）
         self._pw_cache = {}  # 管理員模式下解析到的郵箱密碼緩存（內存，鎖定即清）
         self._ai_jobs = {}  # AI 糾錯任務：job_id -> {"text", "done", "error", "stop"}
+        self._progress = {}  # 長任務進度：progress_id -> {"done", "total", "current"}，前端輪詢 get_progress
+        self._selfmail_lock = threading.RLock()  # 自建郵箱的新建 / 同步不能交錯進行
 
     # ---------- 主密碼 ----------
     def get_lock_state(self):
@@ -630,7 +632,15 @@ class Api:
         return self._create_self_mailbox(self._admin_cfg(), main_email, domain)
 
     @need_unlock
-    def create_recovery_mailboxes(self, ids, domain, overwrite=False):
+    def get_progress(self, progress_id):
+        return self._progress.get(progress_id)
+
+    def _set_progress(self, progress_id, **kw):
+        if progress_id:
+            self._progress.setdefault(progress_id, {"done": 0, "total": 0, "current": ""}).update(kw)
+
+    @need_unlock
+    def create_recovery_mailboxes(self, ids, domain, overwrite=False, progress_id=""):
         """批量：給這些賬號創建自建輔助郵箱並保存。已有輔助郵箱的默認跳過。"""
         cfg = self._admin_cfg()
         ids = [int(i) for i in ids or []]
@@ -638,8 +648,10 @@ class Api:
             return {"created": [], "skipped": 0, "failed": []}
         rows = self._store.query(f"SELECT * FROM accounts WHERE id IN ({','.join('?' for _ in ids)})", ids)
         created, failed, skipped = [], [], 0
-        for r in rows:
+        self._set_progress(progress_id, total=len(rows), done=0)
+        for i, r in enumerate(rows):
             a = self._decrypt_row(r)
+            self._set_progress(progress_id, done=i, current=a["email"])
             if a["recovery_email"] and not overwrite:
                 skipped += 1
                 continue
@@ -653,6 +665,7 @@ class Api:
                 (box["address"], self._cipher.encrypt(box["password"]), int(time.time()), a["id"]),
             )
             created.append({"email": a["email"], "recovery_email": box["address"]})
+        self._progress.pop(progress_id, None)
         return {"created": created, "skipped": skipped, "failed": failed}
 
     # ---------- 自建郵箱管理窗口：本地列表和 BillionMail 後台同步 ----------
@@ -678,6 +691,10 @@ class Api:
 
     @need_unlock
     def selfmail_sync(self):
+        with self._selfmail_lock:  # 正在新建時等它完成，避免把還沒寫分組的郵箱先拉進來
+            return self._selfmail_sync()
+
+    def _selfmail_sync(self):
         cfg = self._admin_cfg()
         boxes = self._admin_client(cfg).all_mailboxes()
         sid = self.selfmail_sheet()
@@ -739,7 +756,8 @@ class Api:
         return {"total": len(seen), "added": added, "updated": updated, "removed": removed}
 
     @need_unlock
-    def selfmail_create(self, domain="", names=None, count=0, prefix="", password="", group_id=None, status=None):
+    def selfmail_create(self, domain="", names=None, count=0, prefix="", password="", group_id=None, status=None,
+                        progress_id=""):
         """批量新建自建郵箱：names = 用戶名或完整地址列表，或者 count 個「prefix + 6 位隨機字符」。
         password 留空 = 每個隨機密碼（也可以寫 {random}）。建好後直接加進自建郵箱列表。"""
         import secrets
@@ -765,24 +783,52 @@ class Api:
             raise ValueError("err.selfmail_pw_short")
         sid = self.selfmail_sheet()
         created, failed = [], []
-        for local, dom in targets:
-            address = f"{local}@{dom}"
-            if not local or not dom:
-                failed.append({"email": address, "error": "err.selfmail_bad_input"})
-                continue
-            try:
-                if client.get_password(address) is not None:
-                    raise RuntimeError("err.selfmail_exists")
-                pw = (password or "{random}").replace("{random}", vault.random_password(14))
-                client.create_mailbox(dom, local, pw)
-            except Exception as e:
-                failed.append({"email": address, "error": str(e)})
-                continue
-            self._pw_cache[address] = pw
-            created.append({"email": address, "password": pw})
-        if created:
-            self.import_rows(sid, created, group_id, status or STATUSES[0], True, None, _selfmail=True)
+        self._set_progress(progress_id, total=len(targets), done=0, current="")
+        try:
+            with self._selfmail_lock:
+                existing = {(m.get("username") or "").lower() for m in client.all_mailboxes()}  # 一次取完，不用逐個查
+                for i, (local, dom) in enumerate(targets):
+                    address = f"{local}@{dom}"
+                    self._set_progress(progress_id, done=i, current=address)
+                    if not local or not dom:
+                        failed.append({"email": address, "error": "err.selfmail_bad_input"})
+                        continue
+                    try:
+                        if address in existing:
+                            raise RuntimeError("err.selfmail_exists")
+                        pw = (password or "{random}").replace("{random}", vault.random_password(14))
+                        client.create_mailbox(dom, local, pw)
+                    except Exception as e:
+                        failed.append({"email": address, "error": str(e)})
+                        continue
+                    existing.add(address)
+                    self._pw_cache[address] = pw
+                    # 建好一個就寫進本地一個：中途中斷或者別處同步過，分組也不會丟
+                    self._selfmail_upsert(sid, address, pw, group_id, status or STATUSES[0])
+                    created.append({"email": address, "password": pw})
+        finally:
+            self._progress.pop(progress_id, None)
         return {"created": created, "failed": failed}
+
+    def _selfmail_upsert(self, sid, email, password, group_id, status):
+        """自建郵箱列表裡加一行；已經有了（例如被同步拉進來過）就更新密碼、分組、狀態。"""
+        now = int(time.time())
+        row = self._store.query("SELECT id FROM accounts WHERE sheet_id=? AND lower(email)=?", (sid, email.lower()))
+        enc = self._cipher.encrypt(password)
+        if row:
+            sets, args = ["password=?", "status=?"], [enc, status]
+            if group_id:
+                sets.append("group_id=?")
+                args.append(group_id)
+            self._store.execute(f"UPDATE accounts SET {', '.join(sets)}, updated_at=? WHERE id=?", args + [now, row[0]["id"]])
+            return row[0]["id"]
+        values = {f: "" for f in FIELDS}
+        values.update(email=email, password=password)
+        self._encrypt_row(values)
+        return self._store.execute(
+            f"INSERT INTO accounts(sheet_id, {', '.join(FIELDS)}, status, group_id, extra, created_at, updated_at) "
+            f"VALUES (?, {', '.join('?' for _ in FIELDS)}, ?, ?, '{{}}', ?, ?)",
+            [sid] + [values[f] for f in FIELDS] + [status, group_id or None, now, now])
 
     def _selfmail_push(self, row, password=None, active=None):
         """把改動寫到 BillionMail 後台（改密碼 / 停用 / 啟用）。"""
@@ -932,15 +978,20 @@ class Api:
 
     def _start_ai_job(self, cfg, messages, tools=None):
         job_id = uuid.uuid4().hex
-        job = {"text": "", "done": False, "error": "", "stop": False, "tool_calls": []}
+        job = {"text": "", "done": False, "error": "", "stop": False, "tool_calls": [], "tool": "", "tool_chars": 0}
         self._ai_jobs[job_id] = job
 
         def run():
             def on_delta(piece):
                 job["text"] += piece
 
+            def on_tool(calls):  # 模型正在生成工具調用：記下工具名和參數長度，前端顯示「正在準備…」
+                if calls:
+                    job["tool"] = calls[-1]["function"]["name"]
+                    job["tool_chars"] = sum(len(c["function"]["arguments"]) for c in calls)
+
             try:
-                job["tool_calls"] = aifix.stream_chat(cfg, messages, on_delta, lambda: job["stop"], tools)
+                job["tool_calls"] = aifix.stream_chat(cfg, messages, on_delta, lambda: job["stop"], tools, on_tool)
             except Exception as e:  # 錯誤帶回前端
                 job["error"] = str(e)
             finally:
@@ -961,7 +1012,7 @@ class Api:
         if done:
             self._ai_jobs.pop(job_id, None)
         return {"delta": text[offset:], "offset": len(text), "done": done, "error": job["error"],
-                "tool_calls": job["tool_calls"] if done else []}
+                "tool_calls": job["tool_calls"] if done else [], "tool": job["tool"], "tool_chars": job["tool_chars"]}
 
     def ai_fix_stop(self, job_id):
         job = self._ai_jobs.pop(job_id, None)

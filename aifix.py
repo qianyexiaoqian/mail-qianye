@@ -91,7 +91,7 @@ def _merge_tool_calls(calls, deltas):
         call["function"]["arguments"] += fn.get("arguments") or ""
 
 
-def stream_chat(cfg, messages, on_delta, should_stop=lambda: False, tools=None):
+def stream_chat(cfg, messages, on_delta, should_stop=lambda: False, tools=None, on_tool=None):
     """流式請求，每收到一段文本調用 on_delta(text)，返回模型要調用的工具列表。
     服務不支持流式時退回一次性返回。"""
     resp = _open(cfg, messages, True, tools=tools)
@@ -123,7 +123,10 @@ def stream_chat(cfg, messages, on_delta, should_stop=lambda: False, tools=None):
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
                     on_delta(delta["content"])
-                _merge_tool_calls(calls, delta.get("tool_calls"))
+                if delta.get("tool_calls"):
+                    _merge_tool_calls(calls, delta["tool_calls"])
+                    if on_tool:
+                        on_tool([calls[i] for i in sorted(calls)])
     result = [calls[i] for i in sorted(calls)]
     for i, c in enumerate(result):
         c["id"] = c["id"] or f"call_{i}"

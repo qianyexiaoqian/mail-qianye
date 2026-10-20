@@ -270,14 +270,15 @@ const AgentMixin = {
     async agentLoop() {
       const agent = this.agent;
       for (let step = 0; step < AGENT_MAX_STEPS; step++) {
-        agent.items.push({ role: 'assistant', text: '', tools: [], streaming: true, error: '' });
+        agent.items.push({ role: 'assistant', text: '', tools: [], streaming: true, error: '', tool: '', toolChars: 0, started: Date.now() });
         const item = agent.items[agent.items.length - 1];  // 響應式代理
         this.agentTrimHistory();
         const messages = [{ role: 'system', content: this.agentSystemPrompt() }, ...agent.history];
         let result;
         try {
           const job = await call('ai_chat_start', messages, this.agentTools);
-          result = await pollAiJob(job, d => { item.text += d; this.agentScroll(); }, () => agent.stop);
+          result = await pollAiJob(job, d => { item.text += d; this.agentScroll(); }, () => agent.stop,
+            r => { if (r.tool) { item.tool = r.tool; item.toolChars = r.tool_chars; } });
         } catch (e) {
           item.error = errText(e);
           item.streaming = false;
@@ -292,7 +293,7 @@ const AgentMixin = {
         if (!calls.length) return;
         for (const c of calls) {
           item.tools.push({ name: c.function.name, status: 'running', summary: '', desc: '', danger: false, resolve: null, undoId: '',
-            args: c.function.arguments || '{}', result: '', open: false });
+            args: c.function.arguments || '{}', result: '', open: false, started: Date.now(), progress: null });
           const tc = item.tools[item.tools.length - 1];
           this.agentScroll();
           let out;
@@ -305,6 +306,7 @@ const AgentMixin = {
             }
           }
           tc.status = out.error ? 'error' : 'done';
+          tc.elapsed = Math.round((Date.now() - tc.started) / 1000);
           tc.summary = out.error ? String(out.error) : this.agentSummary(c.function.name, out);
           if (out.undo_id) tc.undoId = out.undo_id;
           const content = JSON.stringify(out).slice(0, 30000);
@@ -328,7 +330,9 @@ const AgentMixin = {
         case 'move_to_sheet': return t('agent.sum.moved', { n: out.moved, s: out.sheet });
         case 'copy_to_clipboard': return t('agent.sum.copied', { n: out.copied });
         case 'export_accounts': return t('agent.sum.exported', { n: out.exported });
-        case 'create_recovery_mailboxes': case 'create_mailboxes': return t('agent.sum.mailboxes', { n: out.created?.length || 0, f: out.failed?.length || 0 });
+        case 'create_recovery_mailboxes': return t('agent.sum.mailboxes', { n: out.created?.length || 0, f: out.failed?.length || 0 });
+        case 'create_mailboxes': return t('agent.sum.mailboxes', { n: out.created || 0, f: out.failed?.length || 0 }) +
+          (out.in_group != null ? ' · ' + t('agent.sum.inGroup', { n: out.in_group }) : '');
         case 'sync_mailboxes': return t('selfmail.synced', { n: out.total, a: out.added, u: out.updated, d: out.removed });
         case 'get_2fa_codes': return t('agent.sum.found', { n: out.codes?.length || 0 });
         case 'fetch_mail': return t('agent.sum.mails', { n: out.messages?.length || 0 });
@@ -376,6 +380,8 @@ const AgentMixin = {
 - 字符串值可用模板 {email} {user} {domain} {index} {random}（隨機密碼）。
 - 密碼：${secrets}
 - 用戶想「看 / 找 / 篩選」時，用 set_view 或 select_rows(show_only=true) 把結果顯示在表格裡。
+- 用戶粘貼的內容常夾雜從網頁複製來的雜訊（圖標、「Loading...」、空行等），只提取其中有效的郵箱和字段。
+- 批量操作後核對工具返回的計數（created / in_list / in_group / updated / not_found / failed），和預期不一致時自己查明原因並修正，再告訴用戶。
 - 完成後用一兩句話總結做了什麼、影響多少條；工具報錯時根據錯誤調整參數重試，連續失敗再如實告訴用戶錯誤原因。不要編造工具沒有返回的數據。用用戶的語言回答。
 示例（意圖 → 調用）：
 - 「導入下面郵箱，分組 222，編號寫進編號列：a@x.com----pw----備註----7----2FA密鑰 …」→ add_accounts({accounts:[{email:"a@x.com",password:"pw",notes:"備註",totp_secret:"2FA密鑰",columns:{"編號":"7"}}, …], group:"222"})
@@ -406,6 +412,7 @@ ${SELFMAIL ? `
         this.agentScroll();
         const ok = await new Promise(resolve => { tc.resolve = resolve; });
         tc.status = 'running';
+        tc.started = Date.now();
         if (!ok) return { declined: true, error: 'user declined this operation' };
       }
       switch (name) {
@@ -434,14 +441,15 @@ ${SELFMAIL ? `
         case 'create_recovery_mailboxes': {
           const rows = this.agentRows(args.filter);
           const undoId = this.agentPushUndo(t('agent.tool.create_recovery_mailboxes'), { rows: this.agentSnapshot(rows) });
-          const r = await call('create_recovery_mailboxes', rows.map(a => a.id), args.domain, !!args.overwrite);
+          const r = await withProgress(pid => call('create_recovery_mailboxes', rows.map(a => a.id), args.domain, !!args.overwrite, pid),
+            p => { tc.progress = p; });
           await this.loadAccounts();
           return { ...r, undo_id: undoId, note: 'undo only restores the fields; created mailboxes stay on the server' };
         }
         case 'open_account': return this.agentOpen(args);
         case 'set_preferences': return this.agentPrefs(args);
         case 'undo': return this.agentUndo(args.id);
-        case 'create_mailboxes': return this.agentCreateMailboxes(args);
+        case 'create_mailboxes': return this.agentCreateMailboxes(args, tc);
         case 'sync_mailboxes': {
           const r = await call('selfmail_sync');
           await this.loadAccounts();
@@ -1162,15 +1170,34 @@ ${SELFMAIL ? `
         from: m.from_name ? `${m.from_name} <${m.from_addr}>` : m.from_addr, subject: m.subject, date: this.fmtDate(m.date),
         folder: m.folder, codes: m.codes, text: (m.text || '').slice(0, 600) })) };
     },
-    async agentCreateMailboxes(args) {
+    async agentCreateMailboxes(args, tc) {
       const gid = args.group ? await this.agentGroupId(args.group, true) : null;
-      const r = await call('selfmail_create', args.domain || '', args.names || [], parseInt(args.count, 10) || 0, args.prefix || '',
-        args.password || '', gid, null);
+      const r = await withProgress(pid => call('selfmail_create', args.domain || '', args.names || [], parseInt(args.count, 10) || 0,
+        args.prefix || '', args.password || '', gid, null, pid), p => { if (tc) tc.progress = p; });
       await this.loadAccounts();
       await this.refreshState();
-      return { created: r.created.map(x => x.email), failed: r.failed,
+      // 自檢：新建的郵箱是否都在列表裡、都進了分組
+      const made = new Set(r.created.map(x => x.email.toLowerCase()));
+      const rows = this.accounts.filter(a => made.has(a.email.toLowerCase()));
+      const out = { created: r.created.length, emails: r.created.map(x => x.email), failed: r.failed, in_list: rows.length,
         note: 'passwords are saved in the table; use copy_to_clipboard to copy email----password' };
+      if (gid) out.in_group = rows.filter(a => a.group_id === gid).length;
+      return out;
     },
+    // 面板底部的實時狀態：思考中 / 正在準備指令 / 執行中（進度）/ 等待確認
+    agentStatusText() {
+      const a = this.agent;
+      if (!a.busy) return '';
+      const last = a.items[a.items.length - 1];
+      if (!last || last.role !== 'assistant') return t('agent.st.thinking');
+      const tc = last.tools.find(x => x.status === 'running' || x.status === 'confirm');
+      if (tc?.status === 'confirm') return t('agent.st.confirm', { s: this.agentToolLabel(tc.name) });
+      if (tc) return t('agent.st.running', { s: this.agentToolLabel(tc.name) }) + (tc.progress?.total ? ` ${tc.progress.done}/${tc.progress.total}` : '');
+      if (last.streaming && last.tool) return t('agent.st.preparing', { s: this.agentToolLabel(last.tool), n: last.toolChars });
+      if (last.streaming && last.text) return t('agent.st.writing');
+      return t('agent.st.thinking');
+    },
+    agentSecs(start) { return Math.max(0, this.now - Math.floor(start / 1000)); },
     agentCopy(args) {
       const rows = this.agentRows(args.filter);
       const fields = args.fields?.length ? args.fields : ['email', 'password', 'totp_secret', 'recovery_email'];

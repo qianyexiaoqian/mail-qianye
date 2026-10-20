@@ -40,8 +40,9 @@ function aiConfigured(cfg) {
   if (!cfg || !cfg.base_url || !cfg.model) return false;
   return !!cfg.has_api_key || /\/\/(localhost|127\.0\.0\.1)[:/]/.test(cfg.base_url);
 }
-// 輪詢後台 AI 任務直到結束：onDelta(新文本)，shouldStop() 為真時停止。返回 { tool_calls, stopped }，出錯拋異常
-async function pollAiJob(job, onDelta, shouldStop = () => false) {
+// 輪詢後台 AI 任務直到結束：onDelta(新文本)，shouldStop() 為真時停止，onStatus(每次輪詢結果) 用來顯示實時狀態。
+// 返回 { tool_calls, stopped }，出錯拋異常
+async function pollAiJob(job, onDelta, shouldStop = () => false, onStatus = null) {
   let offset = 0;
   for (;;) {
     if (shouldStop()) {
@@ -51,12 +52,22 @@ async function pollAiJob(job, onDelta, shouldStop = () => false) {
     const r = await call('ai_fix_poll', job, offset);
     offset = r.offset;
     if (r.delta) onDelta(r.delta);
+    if (onStatus) onStatus(r);
     if (r.done) {
       if (r.error) throw new Error(r.error);
       return { tool_calls: r.tool_calls || [], stopped: false };
     }
     await new Promise(resolve => setTimeout(resolve, 200));
   }
+}
+
+// 調用一個耗時的後台方法並實時拿進度：fn(progressId) 發起調用，onProgress({done, total, current}) 每 0.4 秒更新一次
+async function withProgress(fn, onProgress) {
+  const pid = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const timer = setInterval(() => {
+    call('get_progress', pid).then(p => { if (p) onProgress(p); }).catch(() => {});
+  }, 400);
+  try { return await fn(pid); } finally { clearInterval(timer); }
 }
 
 // 國家數據、countryName / flag / searchCountries / resolveCountries 在 countries.js
@@ -1245,10 +1256,11 @@ const app = createApp({
       const c = this.smCreate;
       if (c.pwMode === 'fixed' && c.password.length < 8) return this.toast(t('err.selfmail_pw_short'), 'error');
       c.busy = true;
+      c.progress = null;
       try {
         const names = c.mode === 'names' ? c.names.split(/[\s,，;；]+/).filter(Boolean) : [];
-        c.result = await call('selfmail_create', c.domain, names, c.mode === 'random' ? c.count : 0, c.prefix,
-          c.pwMode === 'fixed' ? c.password : '', c.group_id, null);
+        c.result = await withProgress(pid => call('selfmail_create', c.domain, names, c.mode === 'random' ? c.count : 0, c.prefix,
+          c.pwMode === 'fixed' ? c.password : '', c.group_id, null, pid), p => { c.progress = p; });
         await this.loadAccounts();
         await this.refreshState();
         this.toast(t('selfmail.created2', { n: c.result.created.length, f: c.result.failed.length }), c.result.failed.length ? 'error' : 'ok');
