@@ -274,6 +274,7 @@
       <button class="icon-btn" :class="{on: agent.showList}" :title="t('agent.chats')" @click="agentRefreshChats(); agent.showList = !agent.showList">☰</button>
       <b class="ellipsis agent-title" :title="agent.title" @click="agentRefreshChats(); agent.showList = !agent.showList">🤖 {{ agent.title || t('agent.title') }}</b>
       <span class="spacer"></span>
+      <button class="icon-btn" :title="t('kb.title')" @click="openKb()">🧠</button>
       <button class="icon-btn" :title="t('agent.newChat')" @click="agentNewChat">＋</button>
       <button class="icon-btn" :title="t('agent.transcript')" :disabled="!agent.items.length" @click="agentTranscript">📋</button>
       <button class="icon-btn" @click="toggleAgent">✕</button>
@@ -355,7 +356,17 @@
       </div>
     </div>
     <div class="agent-input">
-      <button class="icon-btn agent-clip" :title="t('agent.attach')" @click="$refs.agentFile.click()">📎</button>
+      <div class="agent-tools-col">
+        <button class="icon-btn agent-clip" :title="t('agent.attach')" @click="$refs.agentFile.click()">📎</button>
+        <button class="icon-btn agent-clip" :class="{on: agent.skillMenu}" :title="t('agent.skillMenu')" @click="agent.skillMenu = !agent.skillMenu">⚡</button>
+      </div>
+      <div v-if="agent.skillMenu" class="agent-skill-menu">
+        <div v-for="s in agentSkills" :key="s.id" class="menu-item" @click="agentInsertSkill(s)">
+          <b>/{{ s.name }}</b> <span class="muted">{{ s.description }}</span>
+        </div>
+        <div v-if="!agentSkills.length" class="muted menu-item">{{ t('kb.noSkills') }}</div>
+        <div class="menu-item link" @click="agent.skillMenu = false; openKb('skills')">⚙ {{ t('kb.manage') }}</div>
+      </div>
       <input ref="agentFile" type="file" accept="image/*" multiple style="display:none" @change="agentPickImages">
       <textarea ref="agentInput" v-model="agent.input" rows="3" :placeholder="t('agent.placeholder')"
                 @keydown.enter.exact.prevent="agentSend()" @paste="agentPaste"></textarea>
@@ -617,6 +628,73 @@
     </div>
   </div>
 
+  <!-- ========== AI 助手：技能與經驗 ========== -->
+  <div v-if="kbEdit" class="modal-mask kb-mask" @mousedown.self="kbEdit = null">
+    <div class="modal wide kb-modal">
+      <div class="editor-row">
+        <h3 style="margin:0">🧠 {{ t('kb.title') }}</h3>
+        <span class="spacer"></span>
+        <button class="btn sm" :class="{primary: kbEdit.tab === 'skills'}" @click="kbEdit.tab = 'skills'">{{ t('kb.skills') }}（{{ kbEdit.skills.length }}）</button>
+        <button class="btn sm" :class="{primary: kbEdit.tab === 'memories'}" @click="kbEdit.tab = 'memories'">{{ t('kb.memories') }}（{{ kbEdit.memories.length }}）</button>
+      </div>
+      <p class="muted kb-hint">{{ kbEdit.tab === 'skills' ? t('kb.skillsHint') : t('kb.memoriesHint') }}</p>
+
+      <template v-if="kbEdit.tab === 'skills'">
+        <div class="editor-row" style="margin-bottom:8px">
+          <button class="btn sm" @click="kbAddSkill">＋ {{ t('kb.addSkill') }}</button>
+        </div>
+        <div v-for="(s, i) in kbEdit.skills" :key="s.id" class="kb-item">
+          <div class="editor-row">
+            <input v-model="s.name" class="kb-name" :placeholder="t('kb.name')">
+            <span class="tag kb-src" :class="'src-' + s.source">{{ t('kb.src.' + s.source) }}</span>
+            <select v-model="s.mode" :title="t('kb.modeTip')">
+              <option value="auto">{{ t('kb.mode.auto') }}</option>
+              <option value="manual">{{ t('kb.mode.manual') }}</option>
+              <option value="off">{{ t('kb.mode.off') }}</option>
+            </select>
+            <select v-model="s.scope" :title="t('kb.scopeTip')">
+              <option value="all">{{ t('kb.scope.all') }}</option>
+              <option value="main">{{ t('kb.scope.main') }}</option>
+              <option value="selfmail">{{ t('kb.scope.selfmail') }}</option>
+            </select>
+            <button class="icon-btn" :title="t('kb.edit')" @click="kbEdit.open[s.id] = !kbEdit.open[s.id]">{{ kbEdit.open[s.id] ? '▾' : '▸' }}</button>
+            <button class="icon-btn" :title="t('btn.delete')" @click="kbEdit.skills.splice(i, 1)">✕</button>
+          </div>
+          <input v-model="s.description" class="kb-desc" :placeholder="t('kb.desc')">
+          <template v-if="kbEdit.open[s.id]">
+            <textarea v-model="s.content" rows="7" class="mono kb-content" :placeholder="t('kb.contentPh')"></textarea>
+            <div v-if="s.history && s.history.length" class="editor-row kb-history">
+              <span class="muted">{{ t('kb.history') }}</span>
+              <button v-for="(h, k) in s.history" :key="k" class="btn sm" :title="h.content" @click="kbRollback(s, h)">{{ agentTime(h.updated) }}</button>
+            </div>
+          </template>
+          <div class="muted kb-meta">{{ t('kb.meta', {n: s.uses || 0, t: agentTime(s.updated)}) }} · <code>/{{ s.name }}</code></div>
+        </div>
+        <div v-if="!kbEdit.skills.length" class="muted empty">{{ t('kb.noSkills') }}</div>
+      </template>
+
+      <template v-else>
+        <div class="editor-row" style="margin-bottom:8px">
+          <button class="btn sm" @click="kbAddMemory">＋ {{ t('kb.addMemory') }}</button>
+        </div>
+        <div v-for="(m, i) in kbEdit.memories" :key="m.id" class="kb-mem">
+          <input type="checkbox" v-model="m.enabled" :title="t('kb.enabled')">
+          <input v-model="m.content" :placeholder="t('kb.memoryPh')">
+          <span class="tag kb-src" :class="'src-' + m.source">{{ t('kb.src.' + m.source) }}</span>
+          <button class="icon-btn" :title="t('btn.delete')" @click="kbEdit.memories.splice(i, 1)">✕</button>
+        </div>
+        <div v-if="!kbEdit.memories.length" class="muted empty">{{ t('kb.noMemories') }}</div>
+      </template>
+
+      <div class="modal-foot">
+        <button class="btn sm" :disabled="kbEdit.busy" :title="t('kb.reflectTip')" @click="kbReflectNow">{{ kbEdit.busy ? t('kb.reflecting') : '✨ ' + t('kb.reflect') }}</button>
+        <span class="spacer"></span>
+        <button class="btn" @click="kbEdit = null">{{ t('btn.cancel') }}</button>
+        <button class="btn primary" @click="kbSave">{{ t('btn.save') }}</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ========== 自建郵箱：批量新建 ========== -->
   <div v-if="smCreate" class="modal-mask" @mousedown.self="!smCreate.busy && (smCreate = null)">
     <div class="modal wide">
@@ -791,6 +869,13 @@
           <button class="btn sm" :disabled="settings.aiTesting || !settings.ai.base_url" @click="testAi">{{ settings.aiTesting ? t('mail.testing') : t('ai.test') }}</button>
           <span :class="settings.aiOk ? 'ok-text' : 'danger-text'" class="mail-test-result">{{ settings.aiMsg }}</span>
         </div>
+        <div class="full section-title" style="margin-top:6px">{{ t('agentcfg.section') }}</div>
+        <label>{{ t('agentcfg.turns') }}<input v-model.number="settings.ai.agent_max_turns" type="number" min="1" max="200"></label>
+        <label>{{ t('agentcfg.chars') }}<input v-model.number="settings.ai.agent_max_chars" type="number" min="5000" step="10000"></label>
+        <div class="full muted mail-hint">{{ t('agentcfg.contextHint') }}</div>
+        <label class="full check"><input type="checkbox" v-model="settings.ai.agent_learn"> {{ t('agentcfg.learn') }}</label>
+        <label class="full check"><input type="checkbox" v-model="settings.ai.agent_reflect" :disabled="!settings.ai.agent_learn"> {{ t('agentcfg.reflect') }}</label>
+        <div class="full"><button class="btn sm" @click="openKb()">🧠 {{ t('kb.manage') }}</button></div>
       </div>
 
       <div class="section-title">{{ t('settings.changePw') }}</div>

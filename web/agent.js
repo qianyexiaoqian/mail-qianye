@@ -59,6 +59,20 @@ const AGENT_SET = {
     append_notes: { type: 'string', description: '追加到備註末尾（換行分隔）' },
   },
 };
+// 只改字段裡的一部分文字：不會覆蓋整個字段
+const AGENT_EDITS = {
+  type: 'array',
+  description: '局部修改文字（不覆蓋整個字段）：replace 把 find 換成 value；remove 刪掉 find；prepend / append 在開頭 / 末尾加上 value。' +
+    'regex=true 時 find 是正則（value 裡可用 $1）。field 可以是 notes、phone、recovery_email 等字段或自定義列名',
+  items: {
+    type: 'object',
+    properties: {
+      field: { type: 'string' }, op: { type: 'string', enum: ['replace', 'remove', 'prepend', 'append'] },
+      find: { type: 'string' }, value: { type: 'string' }, regex: { type: 'boolean' }, ignore_case: { type: 'boolean' },
+    },
+    required: ['field', 'op'],
+  },
+};
 const AGENT_COLUMNS = {
   type: 'object', additionalProperties: true,
   description: '自定義列賦值 { "列名": 值 }，列不存在會自動新建。國家列填代碼或國名，顏色列填 #hex 或顏色名，空字符串 = 清空',
@@ -106,9 +120,9 @@ const AGENT_TOOLS = [
     text: { type: 'string' }, group: AGENT_STR, status: AGENT_STR, sheet: AGENT_STR, columns: AGENT_COLUMNS,
     skip_duplicates: { type: 'boolean' },
   }, ['text']),
-  agentFn('update_accounts', '修改郵箱：任意字段、狀態、分組、備註、自定義列值。對 filter 選中的統一修改，或用 items 給每個郵箱分別賦值', {
-    filter: AGENT_FILTER, set: AGENT_SET, columns: AGENT_COLUMNS,
-    items: { type: 'array', description: '分別賦值', items: { type: 'object', properties: { email: AGENT_STR, set: AGENT_SET, columns: AGENT_COLUMNS }, required: ['email'] } },
+  agentFn('update_accounts', '修改郵箱：set / columns 是整個覆蓋字段的值；edits 是只改其中一部分文字（替換、刪掉某些字、加前後綴）。對 filter 選中的統一修改，或用 items 給每個郵箱分別修改', {
+    filter: AGENT_FILTER, set: AGENT_SET, columns: AGENT_COLUMNS, edits: AGENT_EDITS,
+    items: { type: 'array', description: '分別修改', items: { type: 'object', properties: { email: AGENT_STR, set: AGENT_SET, columns: AGENT_COLUMNS, edits: AGENT_EDITS }, required: ['email'] } },
   }),
   agentFn('delete_accounts', '刪除郵箱（用戶會確認，可撤銷）', { filter: AGENT_FILTER }, ['filter']),
   agentFn('move_to_sheet', '把郵箱移動到另一個列表，列表不存在時自動創建', { filter: AGENT_FILTER, sheet: AGENT_STR }, ['sheet']),
@@ -168,6 +182,22 @@ const AGENT_SELFMAIL_TOOLS = [
   }),
   agentFn('sync_mailboxes', '從 BillionMail 後台同步：後台新增的郵箱加進列表，後台刪掉的從列表移除，密碼和停用狀態更新'),
 ];
+// 技能和經驗：read_skill 總是可用；記經驗 / 寫技能在設置裡開了「允許 AI 自動學習」才有
+const AGENT_SKILL_TOOLS = [
+  agentFn('read_skill', '讀取一個技能的完整內容（技能列表見系統提示裡的「可用技能」），遇到相關任務時先讀再照做', { name: AGENT_STR }, ['name']),
+];
+const AGENT_LEARN_TOOLS = [
+  agentFn('remember', '記下一條關於用戶的長期經驗（偏好、習慣、術語含義、對你的糾正），以後每次對話都會帶上。replace_id 給出時更新那一條', {
+    content: { type: 'string', description: '一句話，寫清楚什麼情況下怎麼做；不要記郵箱地址、密碼等具體數據' }, replace_id: AGENT_STR,
+  }, ['content']),
+  agentFn('forget', '刪除一條過時或錯誤的經驗', { id: AGENT_STR }, ['id']),
+  agentFn('save_skill', '把一套可重複使用的做法寫成技能（同名則更新，舊版本會保留可回滾）。用戶教了你一種做法、或完成了以後可能重複的多步任務時使用', {
+    name: { type: 'string', description: '簡短名稱，例如「批量建 MJJ 郵箱」' },
+    description: { type: 'string', description: '一句話：什麼時候用' },
+    content: { type: 'string', description: '具體步驟、要用的工具和參數要點、注意事項' },
+  }, ['name', 'content']),
+];
+
 // 自建郵箱窗口用不上的工具（只有一個列表、郵箱只能在後台新建）
 const AGENT_MAIN_ONLY = ['add_accounts', 'import_text', 'move_to_sheet', 'manage_sheets', 'find_in_all_sheets', 'create_recovery_mailboxes'];
 
@@ -183,14 +213,20 @@ const AgentMixin = {
   data() {
     return { agent: { open: false, items: [], history: [], input: '', busy: false, stop: false, undo: [],
       // 多對話：chatId = 當前對話（null = 還沒保存的新對話），chats = 對話列表，images = 待發送的圖片
-      chatId: null, title: '', chats: [], showList: false, images: [], viewer: '', token: 0 } };
+      chatId: null, title: '', chats: [], showList: false, images: [], viewer: '', token: 0, trimmed: 0, skillMenu: false },
+      // 助手設置（設置 → AI 糾錯裡改）和技能 / 經驗庫
+      agentCfg: { agent_max_turns: 20, agent_max_chars: 150000, agent_learn: true, agent_reflect: true },
+      kb: { skills: [], memories: [], reflected: {} }, kbEdit: null };
   },
 
   computed: {
     agentExamples() { return (SELFMAIL ? [1, 2, 3, 4] : [1, 2, 3, 4, 5]).map(i => t((SELFMAIL ? 'agent.sm' : 'agent.ex') + i)); },
     agentTools() {
-      return SELFMAIL ? [...AGENT_TOOLS.filter(x => !AGENT_MAIN_ONLY.includes(x.function.name)), ...AGENT_SELFMAIL_TOOLS] : AGENT_TOOLS;
+      const base = SELFMAIL ? [...AGENT_TOOLS.filter(x => !AGENT_MAIN_ONLY.includes(x.function.name)), ...AGENT_SELFMAIL_TOOLS] : AGENT_TOOLS;
+      return [...base, ...AGENT_SKILL_TOOLS, ...(this.agentCfg.agent_learn ? AGENT_LEARN_TOOLS : [])];
     },
+    // 技能：當前窗口可用的（停用的不算）
+    agentSkills() { return this.kb.skills.filter(s => s.mode !== 'off' && (!s.scope || s.scope === 'all' || s.scope === (MODE || 'main'))); },
   },
 
   methods: {
@@ -210,6 +246,8 @@ const AgentMixin = {
     // ---------- 多對話：保存 / 恢復 / 切換 ----------
     // 解鎖後調用：載入對話列表，恢復上次的對話和面板狀態
     async agentInit() {
+      await this.agentLoadCfg();
+      await this.agentLoadKb();
       try {
         this.agent.chats = await call('list_chats', MODE);
         const id = this.prefs.agentChatId;
@@ -217,12 +255,26 @@ const AgentMixin = {
         if (this.prefs.agentOpen) this.agent.open = true;
       } catch { /* 忽略 */ }
     },
+    async agentLoadCfg() {
+      try {
+        const c = await call('get_ai_config');
+        for (const k of Object.keys(this.agentCfg)) if (c[k] !== undefined) this.agentCfg[k] = c[k];
+      } catch { /* 忽略 */ }
+    },
+    async agentLoadKb() {
+      try { Object.assign(this.kb, { reflected: {}, ...(await call('get_agent_kb')) }); } catch { /* 忽略 */ }
+    },
+    async agentSaveKb() {
+      const kb = JSON.parse(JSON.stringify(this.kb));
+      await call('save_agent_kb', kb);
+    },
     async agentRefreshChats() {
       try { this.agent.chats = await call('list_chats', MODE); } catch { /* 忽略 */ }
     },
     async agentOpenChat(id) {
       const agent = this.agent;
       if (agent.busy) return this.toast(t('agent.busySwitch'), 'error');
+      if (id !== agent.chatId) this.agentReflectCurrent();
       const c = await call('get_chat', id);
       if (!c) { await this.agentRefreshChats(); return; }
       const d = c.data || {};
@@ -243,6 +295,7 @@ const AgentMixin = {
       if (agent.busy) return this.toast(t('agent.busySwitch'), 'error');
       clearTimeout(this._agentSaveTimer);
       if (agent.items.length) this.agentSaveNow();  // 先把當前對話存好
+      this.agentReflectCurrent();
       Object.assign(agent, { items: [], history: [], undo: [], chatId: null, title: '', showList: false, images: [], input: '',
         token: agent.token + 1 });
       this.prefs.agentChatId = null;
@@ -357,6 +410,14 @@ const AgentMixin = {
       } catch (e) { return this.toast(errText(e), 'error'); }
       if (fromInput) { agent.input = ''; agent.images = []; }
       agent.items.push({ role: 'user', text, images, tools: [] });
+      // 「/技能名 其餘內容」：把技能內容帶進這條消息
+      const m = /^\/(\S+)\s*([\s\S]*)$/.exec(text);
+      const skill = m && this.agentSkills.find(s => s.name.toLowerCase() === m[1].toLowerCase());
+      if (skill) {
+        text = `【${t('agent.useSkill')}：${skill.name}】\n${skill.content}\n\n${m[2] || ''}`.trim();
+        skill.uses = (skill.uses || 0) + 1;
+        this.agentSaveKb().catch(() => {});
+      }
       // 帶圖片時按 OpenAI 多模態格式發送（模型需要支持識圖）
       agent.history.push({ role: 'user', content: images.length
         ? [{ type: 'text', text: text || t('agent.imageOnly') }, ...images.map(url => ({ type: 'image_url', image_url: { url } }))]
@@ -374,22 +435,30 @@ const AgentMixin = {
       }
     },
     // 歷史太長時丟掉最早的幾輪（從一條用戶消息開始截，保證工具調用和結果成對）
-    agentTrimHistory() {
+    // 發給模型的歷史：最多最近 agent_max_turns 輪、agent_max_chars 字（圖片按固定權重算），從一條用戶消息開始截，
+    // 保證工具調用和結果成對。完整歷史仍然保存在對話裡。
+    agentContext() {
       const h = this.agent.history;
-      const size = () => JSON.stringify(h, (k, v) => (k === 'url' && typeof v === 'string' && v.startsWith('data:') ? 'x'.repeat(3000) : v)).length;
-      while (size() > AGENT_HISTORY_LIMIT && h.length > 2) {
-        let i = h.findIndex((m, k) => k > 0 && m.role === 'user');
-        if (i <= 0) break;
-        h.splice(0, i);
+      const maxTurns = Math.max(1, this.agentCfg.agent_max_turns || 20);
+      const maxChars = Math.max(5000, this.agentCfg.agent_max_chars || AGENT_HISTORY_LIMIT);
+      const starts = h.map((m, i) => (m.role === 'user' ? i : -1)).filter(i => i >= 0);
+      let from = starts.length > maxTurns ? starts[starts.length - maxTurns] : 0;
+      const size = arr => JSON.stringify(arr, (k, v) => (k === 'url' && typeof v === 'string' && v.startsWith('data:') ? 'x'.repeat(3000) : v)).length;
+      while (size(h.slice(from)) > maxChars) {
+        const next = starts.find(i => i > from);
+        if (next === undefined) break;
+        from = next;
       }
+      this.agent.trimmed = starts.filter(i => i < from).length;
+      return h.slice(from);
     },
     async agentLoop() {
       const agent = this.agent;
       for (let step = 0; step < AGENT_MAX_STEPS; step++) {
         agent.items.push({ role: 'assistant', text: '', tools: [], streaming: true, error: '', tool: '', toolChars: 0, started: Date.now() });
         const item = agent.items[agent.items.length - 1];  // 響應式代理
-        this.agentTrimHistory();
-        const messages = [{ role: 'system', content: this.agentSystemPrompt() }, ...agent.history];
+        const context = this.agentContext();
+        const messages = [{ role: 'system', content: this.agentSystemPrompt() }, ...context];
         let result;
         try {
           const job = await call('ai_chat_start', messages, this.agentTools);
@@ -454,6 +523,9 @@ const AgentMixin = {
         case 'get_2fa_codes': return t('agent.sum.found', { n: out.codes?.length || 0 });
         case 'fetch_mail': return t('agent.sum.mails', { n: out.messages?.length || 0 });
         case 'undo': return out.undone || '✓';
+        case 'remember': return out.memory || '✓';
+        case 'save_skill': return out.skill || '✓';
+        case 'read_skill': return out.name || '✓';
       }
       return n != null ? t('agent.sum.found', { n }) : '✓';
     },
@@ -468,7 +540,14 @@ const AgentMixin = {
         groups: this.groups.map(g => g.name),
         statuses: this.meta.statuses.map(s => this.statusLabel(s)),
         total_in_sheet: this.accounts.length,
-        table_view: { shown: this.sorted.length, search: this.search, filters: this.filters, sort: this.sort, page: this.page, page_size: this.pageSize },
+        // 用戶當前在看什麼（用名稱，不用內部 id）
+        current_view: {
+          group: this.filters.group === '' ? t('group.all') : this.filters.group === 'none' ? t('group.none') : (this.groupMap[this.filters.group]?.name || ''),
+          status: this.filters.status ? this.statusLabel(this.filters.status) : '', domain: this.filters.domain, country: this.filters.country,
+          has_2fa: this.filters.twofa, has_recovery: this.filters.recovery, search: this.search,
+          sort: this.sort.key ? `${this.sort.key} ${this.sort.dir > 0 ? 'asc' : 'desc'}` : '',
+          shown: this.sorted.length, page: this.page, page_size: this.pageSize,
+        },
         selected: this.accounts.filter(a => this.selected[a.id]).length,
         top_domains: this.domains.slice(0, 15),
         self_hosted_domains: this.selfDomains,
@@ -479,6 +558,19 @@ const AgentMixin = {
       const secrets = this.prefs.agentSecrets
         ? '用戶已允許你讀取密碼類明文，需要時 get_accounts 傳 include_secrets=true。'
         : '默認看不到密碼、2FA 密鑰、令牌（只有 has_xxx）。需要明文的操作用 copy_to_clipboard / export_accounts 在本地完成；用戶要你直接讀出密碼時，告訴他在 AI 助手面板頂部勾選「允許讀取密碼」。';
+      const skills = this.agentSkills;
+      const autoSkills = skills.filter(s => s.mode === 'auto');
+      const manualSkills = skills.filter(s => s.mode !== 'auto');
+      const memories = this.kb.memories.filter(m => m.enabled !== false);
+      const learned = [
+        memories.length ? `關於這個用戶的經驗（優先遵守；過時或錯誤的用 forget 刪掉）：\n${memories.map(m => `- [${m.id}] ${m.content}`).join('\n')}` : '',
+        autoSkills.length ? `技能（用戶要求每次對話都遵循）：\n${autoSkills.map(s => `### ${s.name}\n${s.content}`).join('\n\n')}` : '',
+        manualSkills.length ? `可用技能（相關時先 read_skill 讀完整內容再照做）：\n${manualSkills.map(s => `- ${s.name}：${s.description || ''}`).join('\n')}` : '',
+        this.agent.trimmed ? `（更早的 ${this.agent.trimmed} 輪對話已省略，需要時可以請用戶重新提供）` : '',
+      ].filter(Boolean).join('\n\n');
+      const learnRule = this.agentCfg.agent_learn
+        ? `- 自動學習：用戶糾正你、說明偏好或某個詞的意思時，用 remember 記下（一句話，不記具體郵箱、密碼）；用戶教了一種做法、或你完成了一個以後可能重複的多步任務時，用 save_skill 寫成技能。不要重複記已有的內容。\n`
+        : '';
       return `你是「郵箱管理」桌面軟件內置的 AI 助手（agent）。你能通過工具完成這個軟件裡幾乎所有的操作：用戶讓你做什麼，就直接調用工具去做完，而不是教用戶自己去點界面。
 能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表；查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
 工作方式：
@@ -497,7 +589,12 @@ const AgentMixin = {
 - 字符串值可用模板 {email} {user} {domain} {index} {random}（隨機密碼）。
 - 密碼：${secrets}
 - 用戶想「看 / 找 / 篩選」時，用 set_view 或 select_rows(show_only=true) 把結果顯示在表格裡。
-- 用戶粘貼的內容常夾雜從網頁複製來的雜訊（圖標、「Loading...」、空行等），只提取其中有效的郵箱和字段。
+- 改文字時分清「覆蓋」和「局部修改」：
+  · 「改成 / 設為 / 填上 X」才用 set / columns 覆蓋整個值。
+  · 「把 A 替換成 B」「把裡面的 X 去掉 / 刪掉」「加上前綴 / 後綴」「在備註後面加…」用 update_accounts 的 edits（replace / remove / prepend / append），只動匹配的那部分，其餘內容保持不變。
+  · 「刪除 X 列」= manage_columns 的 delete（整列沒了）；「清空 X 列 / 把 X 列的內容刪掉」= columns 把值設成空字符串，列保留。分不清時先問。
+  · 不要改動或刪除比用戶要求更多的內容；不確定影響範圍時先 get_accounts 看一下。edits 返回 edited = 實際有變化的行數，可用來核對。
+${learnRule}- 用戶粘貼的內容常夾雜從網頁複製來的雜訊（圖標、「Loading...」、空行等），只提取其中有效的郵箱和字段。
 - 批量操作後核對工具返回的計數（created / in_list / in_group / updated / not_found / failed），和預期不一致時自己查明原因並修正，再告訴用戶。
 - 完成後用一兩句話總結做了什麼、影響多少條；工具報錯時根據錯誤調整參數重試，連續失敗再如實告訴用戶錯誤原因。不要編造工具沒有返回的數據。用用戶的語言回答。
 示例（意圖 → 調用）：
@@ -516,6 +613,7 @@ ${SELFMAIL ? `
 - 新建郵箱用 create_mailboxes（會在後台創建）；delete_accounts 會在後台刪除郵箱，不可撤銷；修改密碼、把狀態改成 / 改離「停用」會同步到後台，也不可撤銷。分組、備註、自定義列只存在本地，可以撤銷。
 - 用戶說「同步 / 刷新列表」用 sync_mailboxes；收郵件、驗證碼用 fetch_mail({email, which:"email"})。
 - 可用域名：${JSON.stringify(this.selfDomains)}` : ''}
+${learned ? '\n' + learned + '\n' : ''}
 當前狀態：${JSON.stringify(ctx)}`;
     },
 
@@ -566,6 +664,22 @@ ${SELFMAIL ? `
         case 'open_account': return this.agentOpen(args);
         case 'set_preferences': return this.agentPrefs(args);
         case 'undo': return this.agentUndo(args.id);
+        case 'read_skill': {
+          const s = this.agentSkills.find(x => x.name.toLowerCase() === String(args.name || '').trim().toLowerCase());
+          if (!s) return { error: `no skill "${args.name}"`, skills: this.agentSkills.map(x => x.name) };
+          s.uses = (s.uses || 0) + 1;
+          this.agentSaveKb().catch(() => {});
+          return { name: s.name, content: s.content };
+        }
+        case 'remember': return this.agentRemember(args.content, args.replace_id, 'ai');
+        case 'forget': {
+          const n = this.kb.memories.length;
+          this.kb.memories = this.kb.memories.filter(m => m.id !== args.id);
+          if (this.kb.memories.length === n) return { error: `no memory "${args.id}"` };
+          await this.agentSaveKb();
+          return { forgot: args.id };
+        }
+        case 'save_skill': return this.agentUpsertSkill({ name: args.name, description: args.description, content: args.content }, 'ai');
         case 'create_mailboxes': return this.agentCreateMailboxes(args, tc);
         case 'sync_mailboxes': {
           const r = await call('selfmail_sync');
@@ -587,9 +701,10 @@ ${SELFMAIL ? `
         switch (name) {
           case 'update_accounts':
             if (args.items?.length) return t('agent.confirm.items', { n: args.items.length }) + '\n' +
-              args.items.slice(0, 8).map(it => `${it.email}：${[kv(it.set), kv(it.columns)].filter(Boolean).join('，')}`).join('\n') +
+              args.items.slice(0, 8).map(it => `${it.email}：${[kv(it.set), kv(it.columns), this.agentDescribeEdits(it.edits)].filter(Boolean).join('，')}`).join('\n') +
               (args.items.length > 8 ? '\n…' : '');
-            return t('agent.confirm.update', { n: this.agentRows(args.filter).length }) + '\n' + [kv(args.set), kv(args.columns)].filter(Boolean).join('，');
+            return t('agent.confirm.update', { n: this.agentRows(args.filter).length }) + '\n' +
+              [kv(args.set), kv(args.columns), this.agentDescribeEdits(args.edits)].filter(Boolean).join('，');
           case 'add_accounts': {
             const list = args.accounts || [];
             return t('agent.confirm.add', { n: list.length, s: args.sheet || this.sheetName(this.currentSheet) }) + '\n' +
@@ -1020,16 +1135,20 @@ ${SELFMAIL ? `
       if (args.items?.length) {
         for (const it of args.items) {
           const email = String(it.email || '').trim().toLowerCase();
-          jobs.push({ email, rows: this.accounts.filter(a => a.email.toLowerCase() === email), set: it.set || {}, columns: it.columns || {} });
+          jobs.push({ email, rows: this.accounts.filter(a => a.email.toLowerCase() === email), set: it.set || {}, columns: it.columns || {},
+            edits: it.edits || [] });
         }
       } else {
-        jobs.push({ rows: this.agentRows(args.filter), set: args.set || {}, columns: args.columns || {} });
+        jobs.push({ rows: this.agentRows(args.filter), set: args.set || {}, columns: args.columns || {}, edits: args.edits || [] });
       }
       const notFound = jobs.filter(j => j.email && !j.rows.length).map(j => j.email);
       const affected = [...new Map(jobs.flatMap(j => j.rows).map(a => [a.id, a])).values()];
       if (!affected.length) return { updated: 0, not_found: notFound };
       for (const job of jobs) if (job.set.status) this.agentStatusOrThrow(job.set.status);  // 先校驗，出錯不留撤銷記錄
-      const serverSide = SELFMAIL && jobs.some(j => j.set.password != null || j.set.status != null);
+      for (const job of jobs) for (const e of job.edits) this.agentEditTarget(e.field);  // 先校驗字段，出錯不留撤銷記錄
+      const serverSide = SELFMAIL && jobs.some(j => j.set.password != null || j.set.status != null ||
+        j.edits.some(e => this.agentEditTarget(e.field).field === 'password'));
+      let edited = 0;
       const undoId = serverSide ? '' : this.agentPushUndo(t('agent.tool.update_accounts') + ' ' + affected.length, { rows: this.agentSnapshot(affected) });
       for (const job of jobs) {
         if (!job.rows.length) continue;
@@ -1038,13 +1157,48 @@ ${SELFMAIL ? `
         if (set.status != null && set.status !== '') await call('set_status', ids, this.agentStatusOrThrow(set.status));
         if (set.group != null) await call('set_group', ids, await this.agentGroupId(set.group, true));
         const fieldKeys = AGENT_TEXT_FIELDS.filter(f => set[f] != null);
-        if (fieldKeys.length || set.append_notes) {
-          await call('update_fields', job.rows.map(a => {
+        const fieldEdits = job.edits.filter(e => this.agentEditTarget(e.field).field);
+        if (fieldKeys.length || set.append_notes || fieldEdits.length) {
+          const updates = [];
+          for (const a of job.rows) {
             const fields = {};
             for (const f of fieldKeys) fields[f] = this.agentTemplate(set[f], a, index);
             if (set.append_notes) fields.notes = [fields.notes ?? a.notes, this.agentTemplate(set.append_notes, a, index)].filter(Boolean).join('\n');
-            return { id: a.id, fields };
-          }));
+            let changed = false;
+            for (const e of fieldEdits) {  // 局部修改：在（可能已覆蓋的）當前值上改
+              const f = this.agentEditTarget(e.field).field;
+              const before = fields[f] ?? a[f] ?? '';
+              const after = this.agentApplyEdit(before, e, a, index);
+              if (after !== before) { fields[f] = after; changed = true; }
+            }
+            if (changed) edited++;
+            if (Object.keys(fields).length) updates.push({ id: a.id, fields });
+          }
+          if (updates.length) await call('update_fields', updates);
+        }
+        // 自定義列的局部修改
+        const colEdits = job.edits.filter(e => this.agentEditTarget(e.field).col);
+        if (colEdits.length) {
+          const byCol = new Map();
+          for (const e of colEdits) {
+            const col = this.agentEditTarget(e.field).col;
+            if (!byCol.has(col.id)) byCol.set(col.id, { col, edits: [] });
+            byCol.get(col.id).edits.push(e);
+          }
+          for (const { col, edits } of byCol.values()) {
+            const byValue = new Map();
+            for (const a of job.rows) {
+              const before = String(job.columns[col.name] ?? a.extra?.[col.id] ?? '');
+              let after = before;
+              for (const e of edits) after = this.agentApplyEdit(after, e, a, index);
+              if (after === before) continue;
+              edited++;
+              const v = this.agentColumnValue(col, after);
+              if (!byValue.has(v)) byValue.set(v, []);
+              byValue.get(v).push(a.id);
+            }
+            for (const [v, vids] of byValue) await call('set_extra', vids, col.id, v || null);
+          }
         }
         for (const [name, value] of Object.entries(job.columns)) {
           const col = await this.agentEnsureColumn(name, value);
@@ -1059,7 +1213,166 @@ ${SELFMAIL ? `
       }
       await this.loadAccounts();
       await this.refreshState();
-      return { updated: affected.length, not_found: notFound, undo_id: undoId };
+      const out = { updated: affected.length, not_found: notFound, undo_id: undoId };
+      if (jobs.some(j => j.edits.length)) out.edited = edited;
+      return out;
+    },
+    // edits 的目標：內置文字字段（可用字段名或四種語言的列名）或自定義列
+    agentEditTarget(name) {
+      const n = String(name || '').trim();
+      if (AGENT_TEXT_FIELDS.includes(n)) return { field: n };
+      const byLabel = AGENT_TEXT_FIELDS.find(f => Object.values(I18N).some(d => (d['col.' + f] || '').toLowerCase() === n.toLowerCase()));
+      if (byLabel) return { field: byLabel };
+      const col = this.agentColumn(n);
+      if (col && col.type !== 'image') return { col };
+      throw new Error(`cannot edit "${name}" (use a text field or a custom column name)`);
+    },
+    agentApplyEdit(value, e, a, index) {
+      const s = String(value ?? '');
+      const val = this.agentTemplate(e.value ?? '', a, index);
+      if (e.op === 'prepend') return val + s;
+      if (e.op === 'append') return s + val;
+      if (e.op !== 'replace' && e.op !== 'remove') throw new Error('unknown edit op ' + e.op);
+      if (!e.find) throw new Error('edits: find is required for ' + e.op);
+      const flags = 'g' + (e.ignore_case ? 'i' : '');
+      const re = e.regex ? new RegExp(e.find, flags) : new RegExp(e.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+      const rep = e.op === 'remove' ? '' : val;
+      return e.regex ? s.replace(re, rep) : s.replace(re, () => rep);
+    },
+    agentDescribeEdits(edits) {
+      return (edits || []).map(e => {
+        const f = (() => { try { const x = this.agentEditTarget(e.field); return x.col ? x.col.name : t('col.' + x.field); } catch { return e.field; } })();
+        return t('agent.edit.' + e.op, { f, a: e.find || '', b: e.value || '' });
+      }).join('，');
+    },
+
+    // ---------- 技能和經驗 ----------
+    agentNewId(p) { return p + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); },
+    async agentRemember(content, replaceId, source) {
+      content = String(content || '').trim();
+      if (!content) return { error: 'empty memory' };
+      const mems = this.kb.memories;
+      const old = replaceId && mems.find(m => m.id === replaceId);
+      if (old) Object.assign(old, { content, updated: Date.now() });
+      else if (!mems.some(m => m.content === content)) {
+        mems.push({ id: this.agentNewId('m'), content, enabled: true, source, created: Date.now(), updated: Date.now() });
+        // 最多保留 100 條，超出時先刪最早的自動經驗
+        while (mems.length > 100) mems.splice(Math.max(0, mems.findIndex(m => m.source !== 'user')), 1);
+      }
+      await this.agentSaveKb();
+      return { memory: content, id: old ? old.id : mems[mems.length - 1].id };
+    },
+    async agentUpsertSkill(sk, source) {
+      const name = String(sk.name || '').trim().slice(0, 40);
+      const content = String(sk.content || '').trim();
+      if (!name || !content) return { error: 'name and content are required' };
+      const skills = this.kb.skills;
+      const old = skills.find(s => s.name.toLowerCase() === name.toLowerCase());
+      if (old) {
+        if (old.content !== content) {
+          old.history = [{ content: old.content, description: old.description, updated: old.updated }, ...(old.history || [])].slice(0, 10);
+        }
+        Object.assign(old, { content, description: String(sk.description || old.description || '').trim(), updated: Date.now() });
+      } else {
+        skills.push({ id: this.agentNewId('s'), name, description: String(sk.description || '').trim(), content,
+          mode: sk.mode || (source === 'user' ? 'auto' : 'manual'), scope: 'all', source, uses: 0, created: Date.now(), updated: Date.now(), history: [] });
+        while (skills.length > 100) skills.splice(Math.max(0, skills.findIndex(s => s.source !== 'user')), 1);
+      }
+      await this.agentSaveKb();
+      return { skill: name, updated: !!old };
+    },
+    // 對話結束（新建 / 切換對話）後在後台總結經驗，寫進經驗和技能
+    agentReflectCurrent() {
+      const agent = this.agent;
+      if (!this.agentCfg.agent_learn || !this.agentCfg.agent_reflect || !agent.chatId) return;
+      const userTurns = agent.items.filter(m => m.role === 'user').length;
+      const key = String(agent.chatId);
+      if (userTurns < 2 || (this.kb.reflected[key] || 0) >= agent.items.length) return;
+      this.agentReflect(JSON.parse(JSON.stringify(agent.items)), key, true).catch(() => {});
+    },
+    agentCompactTranscript(items) {
+      const lines = [];
+      for (const m of items) {
+        if (m.role === 'user') lines.push(`用戶：${(m.text || '').slice(0, 1500)}${m.images?.length ? ' [圖片]' : ''}`);
+        else {
+          for (const tc of m.tools || []) lines.push(`  工具 ${tc.name} ${String(tc.args || '').slice(0, 400)} → ${tc.status} ${String(tc.summary || '').slice(0, 200)}`);
+          if (m.text) lines.push(`助手：${m.text.slice(0, 1200)}`);
+          if (m.error) lines.push(`  錯誤：${m.error}`);
+        }
+      }
+      return lines.join('\n').slice(-14000);
+    },
+    async agentReflect(items, key, quiet) {
+      const kb = this.kb;
+      const prompt = `你是「郵箱管理」AI 助手的學習模塊。下面是用戶和助手的一段對話記錄（含工具調用）。請總結值得長期記住的東西，讓助手以後做得更好：
+1. memories：用戶的偏好、習慣、說法的含義、對助手的糾正（例如「用戶說『第一列』通常指排在第一位」）。只記穩定、以後還用得上的；不要記郵箱地址、密碼、一次性的數據；已有經驗裡有的不要重複。
+2. skills：對話裡完成了一個以後可能重複的多步任務、或用戶教了一種做法時，寫成技能：name 簡短；description 一句話說明什麼時候用；content 寫清楚步驟、要用的工具和參數要點、注意事項。已有同名技能時給出改進後的完整版本。
+已有經驗：${JSON.stringify(kb.memories.map(m => m.content))}
+已有技能：${JSON.stringify(kb.skills.map(s => ({ name: s.name, description: s.description })))}
+只輸出一個 JSON 對象，不要其他文字：{"memories": ["..."], "skills": [{"name": "", "description": "", "content": ""}]}；沒有值得記的就輸出 {"memories": [], "skills": []}。`;
+      const job = await call('ai_chat_start', [{ role: 'system', content: prompt }, { role: 'user', content: this.agentCompactTranscript(items) }], null);
+      let text = '';
+      await pollAiJob(job, d => { text += d; });
+      const m = /\{[\s\S]*\}/.exec(text.replace(/```(json)?/g, ''));
+      if (!m) return { memories: 0, skills: 0 };
+      let data;
+      try { data = JSON.parse(m[0]); } catch { return { memories: 0, skills: 0 }; }
+      let nm = 0, ns = 0;
+      for (const c of (data.memories || []).slice(0, 5)) {
+        const r = await this.agentRemember(typeof c === 'string' ? c : c?.content, null, 'auto');
+        if (!r.error) nm++;
+      }
+      for (const s of (data.skills || []).slice(0, 3)) {
+        const r = await this.agentUpsertSkill(s || {}, 'auto');
+        if (!r.error) ns++;
+      }
+      kb.reflected[key] = items.length;
+      const keys = Object.keys(kb.reflected);
+      if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete kb.reflected[k];
+      await this.agentSaveKb();
+      if (nm || ns) this.toast(t('agent.learned', { m: nm, s: ns }));
+      else if (!quiet) this.toast(t('agent.learnedNone'));
+      return { memories: nm, skills: ns };
+    },
+
+    // ---------- 技能與經驗管理窗口 ----------
+    openKb(tab) {
+      this.kbEdit = { tab: tab || 'skills', skills: JSON.parse(JSON.stringify(this.kb.skills)), memories: JSON.parse(JSON.stringify(this.kb.memories)),
+        open: {}, busy: false };
+    },
+    kbAddSkill() {
+      const s = { id: this.agentNewId('s'), name: '', description: '', content: '', mode: 'auto', scope: 'all', source: 'user',
+        uses: 0, created: Date.now(), updated: Date.now(), history: [] };
+      this.kbEdit.skills.unshift(s);
+      this.kbEdit.open[s.id] = true;
+    },
+    kbAddMemory() {
+      this.kbEdit.memories.unshift({ id: this.agentNewId('m'), content: '', enabled: true, source: 'user', created: Date.now(), updated: Date.now() });
+    },
+    kbRollback(s, h) {
+      s.history = [{ content: s.content, description: s.description, updated: s.updated }, ...s.history.filter(x => x !== h)].slice(0, 10);
+      Object.assign(s, { content: h.content, description: h.description || s.description, updated: Date.now() });
+    },
+    async kbSave() {
+      const e = this.kbEdit;
+      this.kb.skills = e.skills.filter(s => s.name.trim() && s.content.trim()).map(s => ({ ...s, name: s.name.trim() }));
+      this.kb.memories = e.memories.filter(m => m.content.trim()).map(m => ({ ...m, content: m.content.trim() }));
+      await this.agentSaveKb();
+      this.kbEdit = null;
+      this.toast(t('kb.saved'));
+    },
+    async kbReflectNow() {
+      if (!this.agent.items.some(m => m.role === 'user')) return this.toast(t('kb.noChat'), 'error');
+      this.kbEdit.busy = true;
+      try {
+        await this.agentReflect(JSON.parse(JSON.stringify(this.agent.items)), String(this.agent.chatId || 'current'), false);
+        this.openKb(this.kbEdit?.tab);
+      } catch (err) { this.toast(errText(err), 'error'); if (this.kbEdit) this.kbEdit.busy = false; }
+    },
+    agentInsertSkill(s) {
+      this.agent.input = `/${s.name} ` + this.agent.input.replace(/^\/\S+\s*/, '');
+      this.agent.skillMenu = false;
+      nextTick(() => this.$refs.agentInput?.focus());
     },
     async agentDelete(args) {
       const rows = this.agentRows(args.filter);

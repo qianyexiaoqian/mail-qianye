@@ -480,7 +480,7 @@ const app = createApp({
         this.mailCfg = await call('get_mail_config');
         this.loadSelfDomains();
       }
-      if (s.ai) await call('set_ai_config', this.aiConfigPayload());
+      if (s.ai) { await call('set_ai_config', this.aiConfigPayload()); await this.agentLoadCfg(); }
       if (s.old || s.pw || s.pw2) {
         if (s.pw.length < 4) return (s.err = t('err.pw_short'));
         if (s.pw !== s.pw2) return (s.err = t('err.pw_mismatch'));

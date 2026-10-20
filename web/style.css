@@ -413,6 +413,24 @@ tr:hover .inbox-btn { visibility: visible; }
 .agent-attach-item img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); cursor: zoom-in; }
 .agent-attach-item .icon-btn { position: absolute; top: -8px; right: -8px; background: var(--panel); border: 1px solid var(--line); border-radius: 50%; }
 .agent-clip { align-self: center; font-size: 16px; }
+.agent-clip.on { background: var(--primary-soft); }
+.agent-tools-col { display: flex; flex-direction: column; gap: 2px; align-self: center; }
+.agent-input { position: relative; }
+.agent-skill-menu { position: absolute; left: 12px; right: 12px; bottom: 100%; z-index: 6; max-height: 260px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; }
+.agent-skill-menu .menu-item { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-modal { width: 820px; }
+.kb-hint { font-size: 12px; margin: 6px 0 10px; }
+.kb-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+.kb-item select { padding: 3px 6px; }
+.kb-name { flex: 1; min-width: 0; font-weight: 600; }
+.kb-desc { width: 100%; font-size: 12px; }
+.kb-content { width: 100%; font-size: 12px; }
+.kb-meta { font-size: 11px; }
+.kb-history { flex-wrap: wrap; font-size: 12px; }
+.kb-mem { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.kb-mem input:not([type=checkbox]) { flex: 1; min-width: 0; }
+.kb-src { font-size: 11px; padding: 0 6px; white-space: nowrap; color: var(--muted); border-color: var(--line-2); }
+.kb-src.src-ai, .kb-src.src-auto { color: var(--primary-2); border-color: var(--sel-border); background: var(--primary-soft); }
 .agent-viewer { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.75); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
 .agent-viewer img { max-width: 92vw; max-height: 92vh; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
 .agent-thinking { display: flex; align-items: center; gap: 6px; font-size: 12px; }
@@ -443,3 +461,4 @@ tr:hover .inbox-btn { visibility: visible; }
 .toasts { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; align-items: center; z-index: 100; pointer-events: none; }
 .toast { background: var(--toast); color: #fff; padding: 8px 16px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.2); max-width: 70vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast.error { background: var(--danger); }
+.modal-mask.kb-mask { z-index: 55; }

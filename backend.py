@@ -247,6 +247,9 @@ class Api:
                     changed = True
             if changed:
                 settings[name] = json.dumps(cfg, ensure_ascii=False)
+        kb = self._store.get_setting("agent_kb")  # AI 助手的技能和經驗（整塊加密）
+        if kb:
+            settings["agent_kb"] = cipher.encrypt(old.decrypt(kb) if old else kb)
         st = self._store
         with st.lock:
             conn = st.conn
@@ -927,6 +930,19 @@ class Api:
             return result, password
         raise last_error or ConnectionError("err.mail_connect")
 
+    # ---------- AI 助手的技能和經驗（{"skills": [...], "memories": [...]}，用主密碼加密，前端負責增刪改） ----------
+    @need_unlock
+    def get_agent_kb(self):
+        raw = self._store.get_setting("agent_kb")
+        kb = json.loads(self._cipher.decrypt(raw)) if raw else {}
+        return {"skills": kb.get("skills") or [], "memories": kb.get("memories") or []}
+
+    @need_unlock
+    def save_agent_kb(self, kb):
+        kb = {"skills": (kb or {}).get("skills") or [], "memories": (kb or {}).get("memories") or []}
+        self._store.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('agent_kb', ?)",
+                            (self._cipher.encrypt(json.dumps(kb, ensure_ascii=False)),))
+
     # ---------- AI 助手的對話記錄（標題和內容都用主密碼加密，每個窗口最多保留 CHAT_LIMIT 個） ----------
     CHAT_LIMIT = 99
 
@@ -979,10 +995,12 @@ class Api:
 
     # ---------- AI 糾錯（OpenAI 兼容接口） ----------
     _AI_DEFAULTS = {"base_url": aifix.DEFAULT_BASE_URL, "model": aifix.DEFAULT_MODEL, "prompt": ""}
+    # AI 助手：攜帶最近多少輪對話、上下文最多多少字；自動學習（AI 可以記經驗、寫技能）；換對話時自動總結經驗
+    _AGENT_DEFAULTS = {"agent_max_turns": 20, "agent_max_chars": 150000, "agent_learn": True, "agent_reflect": True}
     _AI_SECRETS = ("api_key",)
 
     def _ai_config(self, with_secret=False):
-        cfg = {**self._AI_DEFAULTS, **json.loads(self._store.get_setting("ai_config") or "{}")}
+        cfg = {**self._AI_DEFAULTS, **self._AGENT_DEFAULTS, **json.loads(self._store.get_setting("ai_config") or "{}")}
         cfg["prompt"] = cfg.get("prompt") or aifix.DEFAULT_PROMPT
         cfg["default_prompt"] = aifix.DEFAULT_PROMPT
         for key in self._AI_SECRETS:
@@ -1003,6 +1021,15 @@ class Api:
         new = {k: (cfg.get(k, v) or "").strip() for k, v in self._AI_DEFAULTS.items()}
         if new["prompt"] == aifix.DEFAULT_PROMPT.strip():
             new["prompt"] = ""
+        for k, v in self._AGENT_DEFAULTS.items():
+            val = cfg.get(k, old.get(k, v))
+            if isinstance(v, bool):
+                new[k] = bool(val)
+            else:
+                try:
+                    new[k] = max(1, int(val))
+                except (TypeError, ValueError):
+                    new[k] = v
         for key in self._AI_SECRETS:
             val = cfg.get(key)
             if val is None:
