@@ -155,11 +155,25 @@ const AGENT_TOOLS = [
   agentFn('undo', '撤銷你在這次對話裡做的修改（默認最近一次）。返回可撤銷的操作列表', { id: { type: 'string', description: '要撤銷的操作 id，不傳 = 最近一次' } }),
 ];
 
+// 自建郵箱管理窗口專用：這裡每一行就是 BillionMail 後台的真實郵箱
+const AGENT_SELFMAIL_TOOLS = [
+  agentFn('create_mailboxes', '在 BillionMail 後台批量新建郵箱並加入列表：names 給用戶名或完整地址；或 count 個「prefix + 6 位隨機字符」。密碼留空 = 每個隨機', {
+    domain: { type: 'string', description: '域名（names 裡沒寫域名時用它）' },
+    names: { type: 'array', items: { type: 'string' } },
+    count: { type: 'integer', description: '隨機生成多少個（最多 500）' }, prefix: AGENT_STR,
+    password: { type: 'string', description: '統一密碼（至少 8 位），留空 = 隨機' },
+    group: { type: 'string', description: '加入的分組，不存在自動創建' },
+  }),
+  agentFn('sync_mailboxes', '從 BillionMail 後台同步：後台新增的郵箱加進列表，後台刪掉的從列表移除，密碼和停用狀態更新'),
+];
+// 自建郵箱窗口用不上的工具（只有一個列表、郵箱只能在後台新建）
+const AGENT_MAIN_ONLY = ['add_accounts', 'import_text', 'move_to_sheet', 'manage_sheets', 'find_in_all_sheets', 'create_recovery_mailboxes'];
+
 // 修改類（確認後執行，可勾選自動執行）和刪除類（總是確認）
 function agentConfirmLevel(name, args) {
   if (name === 'delete_accounts') return 'danger';
   if (['manage_sheets', 'manage_columns', 'manage_groups'].includes(name) && args.action === 'delete') return 'danger';
-  if (['update_accounts', 'add_accounts', 'import_text', 'move_to_sheet', 'create_recovery_mailboxes'].includes(name)) return 'write';
+  if (['update_accounts', 'add_accounts', 'import_text', 'move_to_sheet', 'create_recovery_mailboxes', 'create_mailboxes'].includes(name)) return 'write';
   return '';
 }
 
@@ -169,7 +183,10 @@ const AgentMixin = {
   },
 
   computed: {
-    agentExamples() { return [1, 2, 3, 4, 5].map(i => t('agent.ex' + i)); },
+    agentExamples() { return (SELFMAIL ? [1, 2, 3, 4] : [1, 2, 3, 4, 5]).map(i => t((SELFMAIL ? 'agent.sm' : 'agent.ex') + i)); },
+    agentTools() {
+      return SELFMAIL ? [...AGENT_TOOLS.filter(x => !AGENT_MAIN_ONLY.includes(x.function.name)), ...AGENT_SELFMAIL_TOOLS] : AGENT_TOOLS;
+    },
   },
 
   methods: {
@@ -259,7 +276,7 @@ const AgentMixin = {
         const messages = [{ role: 'system', content: this.agentSystemPrompt() }, ...agent.history];
         let result;
         try {
-          const job = await call('ai_chat_start', messages, AGENT_TOOLS);
+          const job = await call('ai_chat_start', messages, this.agentTools);
           result = await pollAiJob(job, d => { item.text += d; this.agentScroll(); }, () => agent.stop);
         } catch (e) {
           item.error = errText(e);
@@ -311,7 +328,8 @@ const AgentMixin = {
         case 'move_to_sheet': return t('agent.sum.moved', { n: out.moved, s: out.sheet });
         case 'copy_to_clipboard': return t('agent.sum.copied', { n: out.copied });
         case 'export_accounts': return t('agent.sum.exported', { n: out.exported });
-        case 'create_recovery_mailboxes': return t('agent.sum.mailboxes', { n: out.created?.length || 0, f: out.failed?.length || 0 });
+        case 'create_recovery_mailboxes': case 'create_mailboxes': return t('agent.sum.mailboxes', { n: out.created?.length || 0, f: out.failed?.length || 0 });
+        case 'sync_mailboxes': return t('selfmail.synced', { n: out.total, a: out.added, u: out.updated, d: out.removed });
         case 'get_2fa_codes': return t('agent.sum.found', { n: out.codes?.length || 0 });
         case 'fetch_mail': return t('agent.sum.mails', { n: out.messages?.length || 0 });
         case 'undo': return out.undone || '✓';
@@ -324,7 +342,7 @@ const AgentMixin = {
         today: new Date().toISOString().slice(0, 10),
         ui_language: ui.lang,
         current_sheet: this.sheetName(this.currentSheet),
-        sheets: this.sheets.map(s => ({ name: this.sheetName(s), count: s.count })),
+        sheets: this.visibleSheets.map(s => ({ name: this.sheetName(s), count: s.count })),
         columns: this.allColumns.map(c => ({ name: c.label, key: c.custom ? undefined : c.key, type: c.custom ? c.col.type : undefined, visible: this.isColumnVisible(c.key) })),
         groups: this.groups.map(g => g.name),
         statuses: this.meta.statuses.map(s => this.statusLabel(s)),
@@ -370,6 +388,11 @@ const AgentMixin = {
 - 「分組 29 移到第一個 / 置頂」→ manage_groups({action:"move",name:"29",position:1})；「29 分組往上移一位」→ manage_groups({action:"move",name:"29",offset:-1})
 - 「把 新號 分組放到 222 後面」→ manage_groups({action:"move",name:"新號",after:"222"})；「默認列表放最後」→ manage_sheets({action:"move",name:"默認列表",position:-1})
 - 「剛才改錯了」→ undo
+${SELFMAIL ? `
+你現在在「自建郵箱管理」窗口：表格裡的每一行就是 BillionMail 後台的一個真實郵箱（郵箱 + 登錄密碼）。
+- 新建郵箱用 create_mailboxes（會在後台創建）；delete_accounts 會在後台刪除郵箱，不可撤銷；修改密碼、把狀態改成 / 改離「停用」會同步到後台，也不可撤銷。分組、備註、自定義列只存在本地，可以撤銷。
+- 用戶說「同步 / 刷新列表」用 sync_mailboxes；收郵件、驗證碼用 fetch_mail({email, which:"email"})。
+- 可用域名：${JSON.stringify(this.selfDomains)}` : ''}
 當前狀態：${JSON.stringify(ctx)}`;
     },
 
@@ -418,6 +441,13 @@ const AgentMixin = {
         case 'open_account': return this.agentOpen(args);
         case 'set_preferences': return this.agentPrefs(args);
         case 'undo': return this.agentUndo(args.id);
+        case 'create_mailboxes': return this.agentCreateMailboxes(args);
+        case 'sync_mailboxes': {
+          const r = await call('selfmail_sync');
+          await this.loadAccounts();
+          await this.refreshState();
+          return r;
+        }
         default: return { error: 'unknown tool ' + name };
       }
     },
@@ -447,6 +477,12 @@ const AgentMixin = {
             return t('agent.confirm.add', { n: p.rows.length, s: args.sheet || this.sheetName(this.currentSheet) }) +
               (p.failed.length ? '\n' + t('import.failed', { n: p.failed.length }) : '') +
               (args.group || args.status ? '\n' + kv({ group: args.group, status: args.status }) : '');
+          }
+          case 'create_mailboxes': {
+            const n = args.names?.length || Math.min(500, parseInt(args.count, 10) || 0);
+            return t('agent.confirm.mailboxes', { n, d: args.domain || (args.names || []).map(x => String(x).split('@')[1]).filter(Boolean)[0] || '—' }) +
+              (args.names?.length ? '\n' + args.names.slice(0, 6).join('\n') + (args.names.length > 6 ? '\n…' : '') : '') +
+              (args.group ? '\n' + kv({ group: args.group }) : '');
           }
           case 'delete_accounts': {
             const rows = this.agentRows(args.filter);
@@ -533,7 +569,7 @@ const AgentMixin = {
     },
     agentSheet(name) {
       const n = String(name || '').trim().toLowerCase();
-      return this.sheets.find(s => this.sheetName(s).toLowerCase() === n || s.name.toLowerCase() === n);
+      return this.visibleSheets.find(s => this.sheetName(s).toLowerCase() === n || s.name.toLowerCase() === n);
     },
     agentStatus(v) {
       const s = String(v ?? '').trim().toLowerCase();
@@ -720,7 +756,7 @@ const AgentMixin = {
       const set = args.emails?.length ? new Set(args.emails.map(e => String(e).trim().toLowerCase())) : null;
       const match = this.searchMatcher(args.search || '');
       const out = [];
-      for (const s of this.sheets) {
+      for (const s of this.visibleSheets) {
         const rows = s.id === this.sheetId ? this.accounts : await call('list_accounts', s.id);
         const hits = rows.filter(a => (!set || set.has(a.email.toLowerCase())) && match(a));
         if (hits.length) out.push({ sheet: this.sheetName(s), count: hits.length, emails: hits.slice(0, 30).map(a => a.email) });
@@ -867,7 +903,8 @@ const AgentMixin = {
       const affected = [...new Map(jobs.flatMap(j => j.rows).map(a => [a.id, a])).values()];
       if (!affected.length) return { updated: 0, not_found: notFound };
       for (const job of jobs) if (job.set.status) this.agentStatusOrThrow(job.set.status);  // 先校驗，出錯不留撤銷記錄
-      const undoId = this.agentPushUndo(t('agent.tool.update_accounts') + ' ' + affected.length, { rows: this.agentSnapshot(affected) });
+      const serverSide = SELFMAIL && jobs.some(j => j.set.password != null || j.set.status != null);
+      const undoId = serverSide ? '' : this.agentPushUndo(t('agent.tool.update_accounts') + ' ' + affected.length, { rows: this.agentSnapshot(affected) });
       for (const job of jobs) {
         if (!job.rows.length) continue;
         const ids = job.rows.map(a => a.id);
@@ -901,7 +938,7 @@ const AgentMixin = {
     async agentDelete(args) {
       const rows = this.agentRows(args.filter);
       if (!rows.length) return { deleted: 0 };
-      const undoId = this.agentPushUndo(t('agent.tool.delete_accounts') + ' ' + rows.length, { rows: this.agentSnapshot(rows) });
+      const undoId = SELFMAIL ? '' : this.agentPushUndo(t('agent.tool.delete_accounts') + ' ' + rows.length, { rows: this.agentSnapshot(rows) });
       await call('delete_accounts', rows.map(a => a.id));
       for (const a of rows) delete this.selected[a.id];
       await this.loadAccounts();
@@ -915,7 +952,7 @@ const AgentMixin = {
       if (!sheet) {
         await call('add_sheet', name);
         await this.refreshState();
-        sheet = this.sheets.find(s => s.name === name);
+        sheet = this.visibleSheets.find(s => s.name === name);
       }
       if (sheet.id === this.sheetId) return { moved: 0, sheet: name, note: 'already in this sheet' };
       const undoId = this.agentPushUndo(t('agent.tool.move_to_sheet') + ' ' + rows.length, { rows: this.agentSnapshot(rows) });
@@ -1034,7 +1071,7 @@ const AgentMixin = {
     },
     // 調整分組 / 列表在側邊欄的順序
     async agentMoveItem(kind, item, args) {
-      const list = kind === 'groups' ? this.groups : this.sheets;
+      const list = kind === 'groups' ? this.groups : this.visibleSheets;
       const label = x => (kind === 'groups' ? x.name : this.sheetName(x));
       const findName = n => {
         const x = list.find(y => label(y).toLowerCase() === String(n).trim().toLowerCase() || y.name.toLowerCase() === String(n).trim().toLowerCase());
@@ -1056,13 +1093,13 @@ const AgentMixin = {
       const undoId = this.agentPushUndo(t('agent.tool.manage_' + kind) + ' ' + label(item), { order: { kind, ids } });
       await call('reorder', kind, rest);
       await this.refreshState();
-      const now = kind === 'groups' ? this.groups : this.sheets;
+      const now = kind === 'groups' ? this.groups : this.visibleSheets;
       return { order: now.map(label), undo_id: undoId };
     },
     async agentManageSheets(args) {
       const name = String(args.name || '').trim();
       switch (args.action) {
-        case 'list': return { current: this.sheetName(this.currentSheet), sheets: this.sheets.map(s => ({ name: this.sheetName(s), count: s.count })) };
+        case 'list': return { current: this.sheetName(this.currentSheet), sheets: this.visibleSheets.map(s => ({ name: this.sheetName(s), count: s.count })) };
         case 'create': {
           if (this.agentSheet(name)) return { exists: true, name };
           await call('add_sheet', name);
@@ -1071,7 +1108,7 @@ const AgentMixin = {
         }
         case 'move': {
           const s = this.agentSheet(name);
-          if (!s) return { error: `no sheet "${name}"`, sheets: this.sheets.map(x => this.sheetName(x)) };
+          if (!s) return { error: `no sheet "${name}"`, sheets: this.visibleSheets.map(x => this.sheetName(x)) };
           return this.agentMoveItem('sheets', s, args);
         }
         case 'rename': {
@@ -1084,7 +1121,7 @@ const AgentMixin = {
         case 'switch': {
           let s = this.agentSheet(name);
           if (!s && args.create) { await call('add_sheet', name); await this.refreshState(); s = this.agentSheet(name); }
-          if (!s) return { error: `no sheet "${name}"`, sheets: this.sheets.map(x => this.sheetName(x)) };
+          if (!s) return { error: `no sheet "${name}"`, sheets: this.visibleSheets.map(x => this.sheetName(x)) };
           if (s.id !== this.sheetId) {
             this.sheetId = s.id;
             this.selected = {};
@@ -1096,7 +1133,7 @@ const AgentMixin = {
         case 'delete': {
           const s = this.agentSheet(name);
           if (!s) return { error: `no sheet "${name}"` };
-          if (this.sheets.length <= 1) return { error: t('err.keep_one_sheet') };
+          if (this.visibleSheets.length <= 1) return { error: t('err.keep_one_sheet') };
           const rows = await call('list_accounts', s.id);
           const undoId = this.agentPushUndo(t('agent.tool.manage_sheets') + ' ' + this.sheetName(s),
             { rows, sheet: { name: s.name, columns: JSON.parse(JSON.stringify(s.columns)) } });
@@ -1124,6 +1161,15 @@ const AgentMixin = {
       return { address: r.address, total: r.total, messages: r.messages.slice(0, limit).map(m => ({
         from: m.from_name ? `${m.from_name} <${m.from_addr}>` : m.from_addr, subject: m.subject, date: this.fmtDate(m.date),
         folder: m.folder, codes: m.codes, text: (m.text || '').slice(0, 600) })) };
+    },
+    async agentCreateMailboxes(args) {
+      const gid = args.group ? await this.agentGroupId(args.group, true) : null;
+      const r = await call('selfmail_create', args.domain || '', args.names || [], parseInt(args.count, 10) || 0, args.prefix || '',
+        args.password || '', gid, null);
+      await this.loadAccounts();
+      await this.refreshState();
+      return { created: r.created.map(x => x.email), failed: r.failed,
+        note: 'passwords are saved in the table; use copy_to_clipboard to copy email----password' };
     },
     agentCopy(args) {
       const rows = this.agentRows(args.filter);

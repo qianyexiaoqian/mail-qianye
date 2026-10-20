@@ -23,6 +23,15 @@ def main():
         min_size=(1000, 600),
     )
     api._window = window
+
+    def on_main_closed():  # 主窗口關了，自建郵箱管理窗口也一起關
+        if api._self_window is not None:
+            try:
+                api._self_window.destroy()
+            except Exception:
+                pass
+
+    window.events.closed += on_main_closed
     webview.start()
 
 

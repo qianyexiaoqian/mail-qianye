@@ -123,6 +123,9 @@ class Store:
         for col in ("oauth_client_id", "oauth_token"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        # 列表類型：'' = 普通列表，'selfmail' = 自建郵箱管理窗口用的列表（和 BillionMail 後台同步）
+        if "kind" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(sheets)")}:
+            self.conn.execute("ALTER TABLE sheets ADD COLUMN kind TEXT NOT NULL DEFAULT ''")
         self.conn.commit()
 
     def query(self, sql, args=()):
@@ -175,6 +178,7 @@ class Api:
         self.db_path = db_path or os.path.join(app_dir(), "mail_data.db")
         self._store = Store(self.db_path)
         self._window = None  # 由 main.py 注入，用於文件對話框
+        self._self_window = None  # 自建郵箱管理窗口（第二個窗口）
         self._cipher = None  # 解鎖後才有
         self._admin = None  # BillionMail 後台客戶端（登錄一次後復用）
         self._pw_cache = {}  # 管理員模式下解析到的郵箱密碼緩存（內存，鎖定即清）
@@ -261,17 +265,43 @@ class Api:
         return row
 
     # ---------- 界面偏好（不需要解鎖，鎖屏也要用主題和語言） ----------
-    def get_prefs(self):
-        return json.loads(self._store.get_setting("ui_prefs") or "{}")
+    # mode：'' = 主窗口，'selfmail' = 自建郵箱管理窗口（各自記住列寬、篩選等）
+    def get_prefs(self, mode=""):
+        return json.loads(self._store.get_setting("ui_prefs" + (f"_{mode}" if mode else "")) or "{}")
 
-    def set_prefs(self, prefs):
+    def set_prefs(self, prefs, mode=""):
         self._store.execute(
-            "INSERT OR REPLACE INTO settings(key, value) VALUES ('ui_prefs', ?)", (json.dumps(prefs, ensure_ascii=False),)
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+            ("ui_prefs" + (f"_{mode}" if mode else ""), json.dumps(prefs, ensure_ascii=False)),
         )
 
-    def set_window_title(self, title):
-        if self._window is not None:
-            self._window.title = title
+    def set_window_title(self, title, mode=""):
+        window = self._self_window if mode == "selfmail" else self._window
+        if window is not None:
+            window.title = title
+
+    def open_selfmail_window(self, title="自建郵箱管理"):
+        """打開（或切換到）自建郵箱管理窗口。開發模式（瀏覽器）沒有窗口，返回 None 由前端打開新標籤頁。"""
+        if self._window is None:
+            return None
+        import webview
+
+        if self._self_window is not None:
+            try:
+                self._self_window.restore()
+                self._self_window.show()
+                return True
+            except Exception:
+                self._self_window = None
+        url = (self._window.real_url or "").split("?")[0] + "?mode=selfmail"
+        win = webview.create_window(title, url, js_api=self, width=1360, height=840, min_size=(1000, 600))
+
+        def on_closed():
+            self._self_window = None
+
+        win.events.closed += on_closed
+        self._self_window = win
+        return True
 
     # ---------- 基礎 ----------
     def get_meta(self):
@@ -363,6 +393,8 @@ class Api:
         group_id = data.get("group_id") or None
         extra = json.dumps(data.get("extra") or {}, ensure_ascii=False)
         if data.get("id"):
+            self._selfmail_check_updates([(data["id"], {"email": data.get("email"), "password": data.get("password") or ""})])
+            self._selfmail_status([data["id"]], status)
             sets = ", ".join(f"{f}=?" for f in FIELDS)
             self._store.execute(
                 f"UPDATE accounts SET {sets}, status=?, group_id=?, extra=?, updated_at=? WHERE id=?",
@@ -379,6 +411,9 @@ class Api:
 
     @need_unlock
     def delete_accounts(self, ids):
+        rows = self._selfmail_ids(ids)
+        if rows:  # 自建郵箱：先在後台刪除，成功了再刪本地
+            self._admin_client(self._admin_cfg()).delete_mailboxes([r["email"] for r in rows.values()])
         self._bulk("DELETE FROM accounts WHERE id IN ({})", ids)
 
     @need_unlock
@@ -387,6 +422,7 @@ class Api:
 
     @need_unlock
     def set_status(self, ids, status):
+        self._selfmail_status(ids, status)
         self._bulk("UPDATE accounts SET status=? WHERE id IN ({})", ids, [status])
 
     @need_unlock
@@ -397,6 +433,7 @@ class Api:
     def update_fields(self, updates):
         """批量改字段：updates = [{"id": 1, "fields": {"notes": "...", "phone": "..."}}]，只改給出的字段。"""
         now = int(time.time())
+        self._selfmail_check_updates([(u["id"], u.get("fields") or {}) for u in updates or []])
         st = self._store
         with st.lock:
             for u in updates or []:
@@ -553,7 +590,7 @@ class Api:
 
         cache = self._domain_cache()
         a_record = next((d.get("a_record") for d in cache.get("domains", []) if d.get("domain") == domain), "")
-        hosts = [cache.get("hosts", {}).get(domain), cfg.get("legacy_host"), a_record,
+        hosts = [cache.get("hosts", {}).get(domain), cache.get("mx", {}).get(domain), cfg.get("legacy_host"), a_record,
                  urlparse(cfg.get("panel_url") or "").hostname, f"mail.{domain}"]
         out = []
         for h in hosts:
@@ -617,6 +654,166 @@ class Api:
             )
             created.append({"email": a["email"], "recovery_email": box["address"]})
         return {"created": created, "skipped": skipped, "failed": failed}
+
+    # ---------- 自建郵箱管理窗口：本地列表和 BillionMail 後台同步 ----------
+    # 第二個窗口用一個 kind='selfmail' 的列表，表格、分組、篩選、收信、AI 助手都和主窗口一樣；
+    # 新建 / 刪除 / 改密碼 / 停用直接寫到後台，「同步」把後台的郵箱拉下來（多的新增，少的刪除，密碼更新）。
+    @need_unlock
+    def selfmail_sheet(self):
+        rows = self._store.query("SELECT id FROM sheets WHERE kind='selfmail' ORDER BY id LIMIT 1")
+        if rows:
+            return rows[0]["id"]
+        return self._store.execute(
+            "INSERT INTO sheets(name, kind, sort) VALUES ('自建郵箱', 'selfmail', (SELECT COALESCE(MAX(sort), 0) + 1 FROM sheets))")
+
+    def _selfmail_ids(self, ids):
+        """ids 裡屬於自建郵箱列表的行：{id: 解密後的行}"""
+        ids = [int(i) for i in ids or []]
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        rows = self._store.query(
+            f"SELECT a.* FROM accounts a JOIN sheets s ON s.id = a.sheet_id WHERE s.kind='selfmail' AND a.id IN ({marks})", ids)
+        return {r["id"]: self._decrypt_row(r) for r in rows}
+
+    @need_unlock
+    def selfmail_sync(self):
+        cfg = self._admin_cfg()
+        boxes = self._admin_client(cfg).all_mailboxes()
+        sid = self.selfmail_sheet()
+        local = {r["email"].lower(): r for r in
+                 self._store.query("SELECT id, email, password, status FROM accounts WHERE sheet_id=?", (sid,))}
+        now = int(time.time())
+        added = updated = removed = 0
+        seen, mx = set(), {}
+        cols = ", ".join(FIELDS)
+        marks = ", ".join("?" for _ in FIELDS)
+        st = self._store
+        with st.lock:
+            for b in boxes:
+                email = (b.get("username") or "").strip()
+                if not email:
+                    continue
+                key = email.lower()
+                seen.add(key)
+                pw = b.get("password") or ""
+                active = str(b.get("active", 1)) not in ("0", "False", "false")
+                if b.get("mx"):
+                    mx[key.split("@")[-1]] = b["mx"]
+                if pw:
+                    self._pw_cache[email] = pw
+                r = local.get(key)
+                if r is None:
+                    values = {f: "" for f in FIELDS}
+                    values.update(email=email, password=pw)
+                    self._encrypt_row(values)
+                    st.conn.execute(
+                        f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
+                        f"VALUES (?, {marks}, ?, NULL, ?, ?, ?)",
+                        [sid] + [values[f] for f in FIELDS] + [STATUSES[0] if active else "停用", "{}", now, now])
+                    added += 1
+                    continue
+                sets, args = [], []
+                if pw and self._cipher.decrypt(r["password"]) != pw:
+                    sets.append("password=?")
+                    args.append(self._cipher.encrypt(pw))
+                if not active and r["status"] != "停用":
+                    sets.append("status=?")
+                    args.append("停用")
+                elif active and r["status"] == "停用":
+                    sets.append("status=?")
+                    args.append(STATUSES[0])
+                if sets:
+                    st.conn.execute(f"UPDATE accounts SET {', '.join(sets)}, updated_at=? WHERE id=?", args + [now, r["id"]])
+                    updated += 1
+            for key, r in local.items():
+                if key not in seen:  # 後台已經沒有了
+                    st.conn.execute("DELETE FROM accounts WHERE id=?", (r["id"],))
+                    removed += 1
+            st.conn.commit()
+        if mx:  # 每個域名的郵件服務器，收信時優先嘗試
+            cache = self._domain_cache()
+            cache.setdefault("mx", {}).update(mx)
+            st.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('selfmail_cache', ?)",
+                       (json.dumps(cache, ensure_ascii=False),))
+        return {"total": len(seen), "added": added, "updated": updated, "removed": removed}
+
+    @need_unlock
+    def selfmail_create(self, domain="", names=None, count=0, prefix="", password="", group_id=None, status=None):
+        """批量新建自建郵箱：names = 用戶名或完整地址列表，或者 count 個「prefix + 6 位隨機字符」。
+        password 留空 = 每個隨機密碼（也可以寫 {random}）。建好後直接加進自建郵箱列表。"""
+        import secrets
+        import string
+
+        cfg = self._admin_cfg()
+        client = self._admin_client(cfg)
+        domain = (domain or "").strip().lower().lstrip("@")
+        targets = []
+        for n in names or []:
+            n = str(n).strip()
+            if not n:
+                continue
+            local, _, dom = n.partition("@")
+            targets.append((re.sub(r"[^a-z0-9_-]", "", local.lower()), (dom or domain).strip().lower()))
+        prefix = re.sub(r"[^a-z0-9_-]", "", (prefix or "").lower())
+        for _ in range(max(0, min(int(count or 0), 500))):
+            rand = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(6))
+            targets.append((prefix + rand, domain))
+        if not targets:
+            raise ValueError("err.selfmail_no_names")
+        if password and "{random}" not in password and len(password) < 8:
+            raise ValueError("err.selfmail_pw_short")
+        sid = self.selfmail_sheet()
+        created, failed = [], []
+        for local, dom in targets:
+            address = f"{local}@{dom}"
+            if not local or not dom:
+                failed.append({"email": address, "error": "err.selfmail_bad_input"})
+                continue
+            try:
+                if client.get_password(address) is not None:
+                    raise RuntimeError("err.selfmail_exists")
+                pw = (password or "{random}").replace("{random}", vault.random_password(14))
+                client.create_mailbox(dom, local, pw)
+            except Exception as e:
+                failed.append({"email": address, "error": str(e)})
+                continue
+            self._pw_cache[address] = pw
+            created.append({"email": address, "password": pw})
+        if created:
+            self.import_rows(sid, created, group_id, status or STATUSES[0], True, None, _selfmail=True)
+        return {"created": created, "failed": failed}
+
+    def _selfmail_push(self, row, password=None, active=None):
+        """把改動寫到 BillionMail 後台（改密碼 / 停用 / 啟用）。"""
+        client = self._admin_client(self._admin_cfg())
+        m = client.get_mailbox(row["email"])
+        if m is None:
+            raise ValueError("err.admin_no_mailbox")
+        client.update_mailbox(m, password=password, active=active)
+        if password:
+            self._pw_cache[row["email"]] = password
+
+    def _selfmail_check_updates(self, updates):
+        """自建郵箱列表的行：郵箱地址不能改；改了密碼就同步到後台。updates = [(id, {字段: 新值})]"""
+        rows = self._selfmail_ids([i for i, _ in updates])
+        for i, fields in updates:
+            r = rows.get(int(i))
+            if r is None:
+                continue
+            if "email" in fields and (fields["email"] or "").strip().lower() != r["email"].lower():
+                raise ValueError("err.selfmail_email_readonly")
+            new_pw = (fields.get("password") or "").strip()
+            if "password" in fields and new_pw != r["password"]:
+                if len(new_pw) < 8:
+                    raise ValueError("err.selfmail_pw_short")
+                self._selfmail_push(r, password=new_pw)
+
+    def _selfmail_status(self, ids, status):
+        """自建郵箱：狀態改成 / 改離「停用」時，在後台停用 / 啟用郵箱。"""
+        for r in self._selfmail_ids(ids).values():
+            if (status == "停用") != (r["status"] == "停用"):
+                self._selfmail_push(r, active=0 if status == "停用" else 1)
 
     @need_unlock
     def fetch_mail(self, account_id, which="recovery", limit=None):
@@ -778,9 +975,11 @@ class Api:
 
     # ---------- 導入 / 導出 ----------
     @need_unlock
-    def import_rows(self, sheet_id, rows, group_id=None, status="正常", skip_dup=True, extra=None):
+    def import_rows(self, sheet_id, rows, group_id=None, status="正常", skip_dup=True, extra=None, _selfmail=False):
         """rows：前端已解析好的行（字段見 FIELDS，可帶每行自己的 extra，例如國家）。
         extra：所有導入行共用的自定義列值，例如顏色標記、國家；行自己的值優先。"""
+        if not _selfmail and self._store.query("SELECT 1 FROM sheets WHERE id=? AND kind='selfmail'", (sheet_id,)):
+            raise ValueError("err.selfmail_use_create")  # 自建郵箱列表只能用「新建郵箱」，保證和後台一致
         common = {k: v for k, v in (extra or {}).items() if v}
         existing = set()
         if skip_dup:

@@ -105,6 +105,8 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .side-actions { margin-top: auto; display: flex; gap: 6px; padding: 0 2px; }
 .side-btn { flex: 1; border: 1px solid var(--side-line); background: transparent; color: var(--side-text); border-radius: 6px; padding: 5px 0; cursor: pointer; font-size: 12px; }
 .side-btn:hover { background: var(--side-2); color: #fff; }
+.side-btn.side-wide { flex: none; width: calc(100% - 4px); margin: auto 2px 8px; padding: 7px 0; font-size: 13px; }
+.side-wide + .side-actions { margin-top: 0; }
 .side-foot { padding: 10px 8px 0; font-size: 11px; color: var(--side-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar .icon-btn { color: inherit; }
 .sidebar .icon-btn:hover { background: rgba(255,255,255,.12); color: #fff; }

@@ -37,16 +37,16 @@
   <!-- ========== 側邊欄 ========== -->
   <aside class="sidebar">
     <div class="brand">
-      <span>📧 {{ t('app.title') }}</span>
+      <span>{{ selfmail ? '📬' : '📧' }} {{ appTitle }}</span>
       <button class="icon-btn" :title="t('settings.theme')" @click="toggleTheme">{{ isDark ? '☀' : '☾' }}</button>
     </div>
 
-    <div class="side-title">
+    <div v-if="!selfmail" class="side-title">
       <span>{{ t('side.sheets') }}</span>
       <button class="icon-btn" :title="t('sheet.add')" @click="addSheet">＋</button>
     </div>
-    <ul class="side-list">
-      <li v-for="s in sheets" :key="s.id" :class="{active: s.id === sheetId, 'drag-over': sideOver === 'sheets' + s.id}" @click="selectSheet(s.id)"
+    <ul v-if="!selfmail" class="side-list">
+      <li v-for="s in visibleSheets" :key="s.id" :class="{active: s.id === sheetId, 'drag-over': sideOver === 'sheets' + s.id}" @click="selectSheet(s.id)"
           @dblclick="renameSheet(s)" :title="t('sheet.dblclick')" draggable="true"
           @dragstart="onSideDragStart('sheets', s.id, $event)" @dragover="onSideDragOver('sheets', s.id, $event)"
           @drop.prevent="onSideDrop('sheets', s.id)" @dragend="onSideDragEnd">
@@ -81,6 +81,7 @@
       </li>
     </ul>
 
+    <button v-if="!selfmail" class="side-btn side-wide" @click="openSelfmailWindow" :title="t('selfmail.openTip')">📬 {{ t('selfmail.title') }}</button>
     <div class="side-actions">
       <button class="side-btn" @click="lockNow" :title="t('lock.lockTip')">🔒 {{ t('lock.lock') }}</button>
       <button class="side-btn" @click="openSettings">⚙ {{ t('settings.title') }}</button>
@@ -96,8 +97,14 @@
         <input ref="searchInput" v-model="search" :placeholder="t('search.placeholder')">
         <button v-if="search" class="icon-btn sm" @click="search = ''">✕</button>
       </div>
-      <button class="btn primary" @click="openEdit()">{{ t('btn.add') }}</button>
-      <button class="btn" @click="openImport">{{ t('btn.import') }}</button>
+      <template v-if="selfmail">
+        <button class="btn primary" @click="openSelfmailCreate">{{ t('selfmail.create') }}</button>
+        <button class="btn" :disabled="smSyncing" @click="selfmailSync(false)" :title="t('selfmail.syncTip')">{{ smSyncing ? t('selfmail.syncing') : '⟳ ' + t('selfmail.sync') }}</button>
+      </template>
+      <template v-else>
+        <button class="btn primary" @click="openEdit()">{{ t('btn.add') }}</button>
+        <button class="btn" @click="openImport">{{ t('btn.import') }}</button>
+      </template>
       <div class="dropdown" @mouseleave="exportMenu = false">
         <button class="btn" @click="exportMenu = !exportMenu">{{ t('btn.export') }} ▾</button>
         <div v-if="exportMenu" class="menu">
@@ -109,6 +116,7 @@
       <button class="btn" :class="{primary: agent.open}" @click="toggleAgent">🤖 {{ t('agent.title') }}</button>
     </header>
 
+    <div v-if="selfmail && mailCfg && !mailCfg.panel_url" class="inbox-error">{{ t('selfmail.notConfigured') }}</div>
     <div class="filters">
       <select v-model="filters.status">
         <option value="">{{ t('filter.allStatus') }}</option>
@@ -155,9 +163,9 @@
         <option value="">{{ t('bulk.setStatus') }}</option>
         <option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option>
       </select>
-      <select v-if="sheets.length > 1" @change="bulkMove($event)">
+      <select v-if="visibleSheets.length > 1" @change="bulkMove($event)">
         <option value="">{{ t('bulk.move') }}</option>
-        <option v-for="s in sheets" v-show="s.id !== sheetId" :value="s.id">{{ sheetName(s) }}</option>
+        <option v-for="s in visibleSheets" v-show="s.id !== sheetId" :value="s.id">{{ sheetName(s) }}</option>
       </select>
       <select v-if="currentSheet.columns.length" @change="openBulkColumn($event)">
         <option value="">{{ t('bulk.setColumn') }}</option>
@@ -241,7 +249,7 @@
           </tr>
         </tbody>
       </table>
-      <div v-if="!filtered.length" class="empty">{{ accounts.length ? t('empty.filtered') : t('empty.sheet') }}</div>
+      <div v-if="!filtered.length" class="empty">{{ accounts.length ? t('empty.filtered') : (selfmail ? t('selfmail.empty') : t('empty.sheet')) }}</div>
     </div>
 
     <footer class="pager">
@@ -399,7 +407,7 @@
     <div class="modal wide">
       <h3>{{ edit.id ? t('edit.titleEdit') : t('edit.titleNew') }}</h3>
       <div class="form-grid">
-        <label>{{ t('col.email') }} *<input v-model="edit.email" ref="editFirst" class="mono" placeholder="name@example.com"></label>
+        <label>{{ t('col.email') }} *<input v-model="edit.email" ref="editFirst" class="mono" placeholder="name@example.com" :readonly="selfmail && !!edit.id" :title="selfmail ? t('selfmail.emailReadonly') : ''"></label>
         <label>{{ t('col.password') }}
           <div class="input-row"><input v-model="edit.password" class="mono"><button class="btn sm" @click="edit.password = genPassword()" :title="t('edit.randomTip')">{{ t('edit.random') }}</button></div>
         </label>
@@ -409,7 +417,7 @@
         </label>
         <label>{{ t('col.recovery_email') }}
           <div class="input-row">
-            <select v-if="selfDomains.length" v-model="recType" class="rec-type" :disabled="recBusy" :title="t('selfmail.typeTip')" @change="onRecType">
+            <select v-if="selfDomains.length && !selfmail" v-model="recType" class="rec-type" :disabled="recBusy" :title="t('selfmail.typeTip')" @change="onRecType">
               <option value="">{{ t('selfmail.manual') }}</option>
               <option v-for="d in selfDomains" :key="d" :value="d">{{ t('selfmail.option', {domain: d}) }}</option>
             </select>
@@ -565,6 +573,66 @@
           {{ impAiChecked.length ? t('import.submitAi', {n: impRows.length, m: impAiChecked.length}) : t('import.submit', {n: impRows.length}) }}
         </button>
       </div>
+    </div>
+  </div>
+
+  <!-- ========== 自建郵箱：批量新建 ========== -->
+  <div v-if="smCreate" class="modal-mask" @mousedown.self="!smCreate.busy && (smCreate = null)">
+    <div class="modal wide">
+      <h3>{{ t('selfmail.createTitle') }}</h3>
+      <template v-if="!smCreate.result">
+        <div class="form-grid">
+          <label>{{ t('selfmail.domain') }}
+            <select v-model="smCreate.domain">
+              <option v-for="d in selfDomains" :key="d" :value="d">@{{ d }}</option>
+            </select>
+          </label>
+          <label>{{ t('col.group') }}
+            <select v-model="smCreate.group_id"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
+          </label>
+          <div class="full editor-row">
+            <label class="check"><input type="radio" value="names" v-model="smCreate.mode"> {{ t('selfmail.byNames') }}</label>
+            <label class="check"><input type="radio" value="random" v-model="smCreate.mode"> {{ t('selfmail.byRandom') }}</label>
+          </div>
+          <label v-if="smCreate.mode === 'names'" class="full">{{ t('selfmail.names') }}
+            <textarea v-model="smCreate.names" rows="7" class="mono" :placeholder="t('selfmail.namesPh')"></textarea>
+          </label>
+          <template v-else>
+            <label>{{ t('selfmail.count') }}<input v-model.number="smCreate.count" type="number" min="1" max="500"></label>
+            <label>{{ t('selfmail.prefix') }}<input v-model="smCreate.prefix" class="mono" placeholder="user"></label>
+            <div class="full muted mail-hint">{{ t('selfmail.randomHint', {p: smCreate.prefix || ''}) }}</div>
+          </template>
+          <div class="full editor-row">
+            <span class="muted">{{ t('col.password') }}：</span>
+            <label class="check"><input type="radio" value="random" v-model="smCreate.pwMode"> {{ t('selfmail.pwRandom') }}</label>
+            <label class="check"><input type="radio" value="fixed" v-model="smCreate.pwMode"> {{ t('selfmail.pwFixed') }}</label>
+            <input v-if="smCreate.pwMode === 'fixed'" v-model="smCreate.password" class="mono" :placeholder="t('selfmail.pwMin')">
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span class="muted">{{ t('selfmail.createHint') }}</span>
+          <span class="spacer"></span>
+          <button class="btn" :disabled="smCreate.busy" @click="smCreate = null">{{ t('btn.cancel') }}</button>
+          <button class="btn primary" :disabled="smCreate.busy || !smCreate.domain && smCreate.mode === 'random' || !smCreateCount()" @click="doSelfmailCreate">
+            {{ smCreate.busy ? t('selfmail.creating') : t('selfmail.createN', {n: smCreateCount()}) }}
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="muted">{{ t('selfmail.created2', {n: smCreate.result.created.length, f: smCreate.result.failed.length}) }}</div>
+        <div class="mini-wrap" v-if="smCreate.result.created.length">
+          <table class="grid mini">
+            <tr><th>{{ t('col.email') }}</th><th>{{ t('col.password') }}</th></tr>
+            <tr v-for="x in smCreate.result.created" :key="x.email"><td class="mono">{{ x.email }}</td><td class="mono">{{ x.password }}</td></tr>
+          </table>
+        </div>
+        <div v-for="f in smCreate.result.failed" :key="f.email" class="danger-text mail-hint">{{ f.email }}：{{ errText(f.error) }}</div>
+        <div class="modal-foot">
+          <span class="spacer"></span>
+          <button v-if="smCreate.result.created.length" class="btn" @click="copySelfmailResult">{{ t('selfmail.copyAll') }}</button>
+          <button class="btn primary" @click="smCreate = null">{{ t('btn.ok') }}</button>
+        </div>
+      </template>
     </div>
   </div>
 

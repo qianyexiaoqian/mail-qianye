@@ -2,6 +2,9 @@ const { createApp, reactive, nextTick } = Vue;
 
 // ---------- 後端調用：桌面版走 pywebview，開發模式 (?dev) 走 HTTP ----------
 const DEV = new URLSearchParams(location.search).has('dev');
+// 自建郵箱管理窗口（第二個窗口）：同一套界面，只顯示和 BillionMail 後台同步的「自建郵箱」列表
+const MODE = new URLSearchParams(location.search).get('mode') === 'selfmail' ? 'selfmail' : '';
+const SELFMAIL = MODE === 'selfmail';
 const apiReady = DEV ? Promise.resolve() : new Promise(resolve => {
   if (window.pywebview && window.pywebview.api && window.pywebview.api.get_state) return resolve();
   window.addEventListener('pywebviewready', () => resolve());
@@ -108,6 +111,9 @@ const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, im
 const MIN_COL_WIDTH = 50;
 const INBOX_PAGE = 15;  // 收件箱每次刷新取的數量，「加載更多」每次多取 50 封
 const INBOX_MORE = 50;
+// 自建郵箱窗口默認顯示的列：密碼要看，2FA / 輔助郵箱用不上
+const SELFMAIL_VISIBLE = { index: true, email: true, password: true, totp: false, recovery_email: false, recovery_password: false,
+  phone: false, group: true, status: true, notes: true, updated: true };
 const DEFAULT_FILTERS = { group: '', status: '', domain: '', twofa: '', recovery: '', country: '' };
 const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize: 20, page: 1, scroll: 0, sheetId: null,
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
@@ -159,6 +165,7 @@ const app = createApp({
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
       selfDomains: [], recType: '', recBusy: false, sideDrag: null, sideOver: '',
+      selfmail: SELFMAIL, smCreate: null, smSyncing: false,
       lock: { has_password: false, unlocked: false },
       lockForm: { pw: '', pw2: '', err: '', busy: false },
       systemDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
@@ -168,6 +175,9 @@ const app = createApp({
 
   computed: {
     currentSheet() { return this.sheets.find(s => s.id === this.sheetId) || { columns: [], name: '' }; },
+    // 主窗口不顯示自建郵箱列表；自建郵箱窗口只顯示它
+    visibleSheets() { return this.sheets.filter(s => (s.kind === 'selfmail') === SELFMAIL); },
+    appTitle() { return SELFMAIL ? t('selfmail.title') : t('app.title'); },
     dbName() { return (this.meta.db_path || '').split(/[\\/]/).pop(); },
     groupMap() { return Object.fromEntries(this.groups.map(g => [g.id, g])); },
     importFields() { return [...this.meta.fields, ...IMPORT_EXTRA_FIELDS, 'skip']; },
@@ -316,8 +326,8 @@ const app = createApp({
     'prefs.lang': { immediate: true, handler(v) {
       ui.lang = v;
       document.documentElement.lang = v;
-      document.title = t('app.title');
-      call('set_window_title', t('app.title')).catch(() => {});
+      document.title = this.appTitle;
+      call('set_window_title', this.appTitle, MODE).catch(() => {});
     } },
     isDark: { immediate: true, handler(v) { document.documentElement.dataset.theme = v ? 'dark' : 'light'; } },
     prefs: { deep: true, handler() { this.savePrefs(); } },
@@ -326,9 +336,13 @@ const app = createApp({
   async mounted() {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => { this.systemDark = e.matches; });
     this.meta = await call('get_meta');
-    const saved = await call('get_prefs');
+    const saved = await call('get_prefs', MODE);
     this.prefs = { ...JSON.parse(JSON.stringify(DEFAULT_PREFS)), ...saved };
-    this.prefs.visible = { ...DEFAULT_VISIBLE, ...this.prefs.visible };
+    if (SELFMAIL) {
+      const main = await call('get_prefs');
+      for (const k of ['theme', 'lang', 'autoLock', 'agentSecrets']) if (main[k] !== undefined) this.prefs[k] = main[k];
+    }
+    this.prefs.visible = { ...(SELFMAIL ? SELFMAIL_VISIBLE : DEFAULT_VISIBLE), ...(saved.visible || {}) };
     const p = this.prefs;
     this.pageSize = [20, 50, 100, 200].includes(p.pageSize) ? p.pageSize : 20;
     this.sheetId = p.sheetId;
@@ -344,6 +358,7 @@ const app = createApp({
     for (const ev of ['mousemove', 'mousedown', 'keydown', 'wheel']) window.addEventListener(ev, () => { this._lastActive = Date.now(); }, { passive: true });
     setInterval(() => {
       this.now = Math.floor(Date.now() / 1000);
+      if (this.now % 3 === 0) this.syncLockState();
       if (!this.lock.unlocked) return;
       if (this.prefs.autoLock && Date.now() - this._lastActive > this.prefs.autoLock * 60000) return this.lockNow();
       const w = Math.floor(this.now / 30);
@@ -355,12 +370,12 @@ const app = createApp({
   },
 
   methods: {
-    t, flag, countryName,
+    t, flag, countryName, errText,
 
     // ---------- 偏好 ----------
     savePrefs() {
       clearTimeout(this._prefTimer);
-      this._prefTimer = setTimeout(() => call('set_prefs', JSON.parse(JSON.stringify(this.prefs))).catch(() => {}), 400);
+      this._prefTimer = setTimeout(() => call('set_prefs', JSON.parse(JSON.stringify(this.prefs)), MODE).catch(() => {}), 400);
     },
     toggleTheme() { this.prefs.theme = this.isDark ? 'light' : 'dark'; },
     onTableScroll(e) {
@@ -602,9 +617,14 @@ const app = createApp({
       const st = await call('get_state');
       this.sheets = st.sheets;
       this.groups = st.groups;
-      if (!this.sheets.some(s => s.id === this.sheetId)) this.sheetId = this.sheets[0]?.id;
+      if (SELFMAIL && !this.visibleSheets.length) {  // 第一次打開：建好自建郵箱列表
+        await call('selfmail_sheet');
+        await this.refreshState();
+      }
+      if (!this.visibleSheets.some(s => s.id === this.sheetId)) this.sheetId = this.visibleSheets[0]?.id;
       if (typeof this.filters.group === 'number' && !this.groupMap[this.filters.group]) this.filters.group = '';
       await this.loadAccounts();
+      if (SELFMAIL && !this._synced) { this._synced = true; this.selfmailSync(true); }  // 打開窗口時自動同步一次
       if (this._restore) {
         const r = this._restore;
         this._restore = null;
@@ -927,8 +947,9 @@ const app = createApp({
       this.toast(isNew ? t('edit.added') : t('edit.saved'));
     },
     async deleteOne(a) {
-      if (!(await this.confirm(t('edit.deleteTitle'), t('edit.deleteConfirm', { email: a.email })))) return;
-      await call('delete_accounts', [a.id]);
+      const msg = SELFMAIL ? t('selfmail.deleteOne', { email: a.email }) : t('edit.deleteConfirm', { email: a.email });
+      if (!(await this.confirm(t('edit.deleteTitle'), msg))) return;
+      try { await call('delete_accounts', [a.id]); } catch (e) { return this.toast(errText(e), 'error'); }
       await this.afterBulk(t('edit.deleted'));
     },
     genPassword() {
@@ -949,7 +970,7 @@ const app = createApp({
     async bulkStatus(e) {
       const v = e.target.value; e.target.value = '';
       if (!v) return;
-      await call('set_status', this.selectedIds, v);
+      try { await call('set_status', this.selectedIds, v); } catch (e) { this.toast(errText(e), 'error'); }
       await this.afterBulk(t('bulk.statusDone'), false);
     },
     async bulkMove(e) {
@@ -960,8 +981,8 @@ const app = createApp({
     },
     async bulkDelete() {
       const n = this.selectedIds.length;
-      if (!(await this.confirm(t('bulk.deleteTitle'), t('bulk.deleteConfirm', { n })))) return;
-      await call('delete_accounts', this.selectedIds);
+      if (!(await this.confirm(t('bulk.deleteTitle'), SELFMAIL ? t('selfmail.deleteMany', { n }) : t('bulk.deleteConfirm', { n })))) return;
+      try { await call('delete_accounts', this.selectedIds); } catch (e) { return this.toast(errText(e), 'error'); }
       await this.afterBulk(t('bulk.deleted', { n }));
     },
     async afterBulk(msg, clear = true) {
@@ -1176,8 +1197,67 @@ const app = createApp({
       } else if (ctrl && e.key.toLowerCase() === 'f') {
         e.preventDefault(); this.$refs.searchInput?.focus(); this.$refs.searchInput?.select();
       } else if (ctrl && e.key.toLowerCase() === 'n' && !this.edit) {
-        e.preventDefault(); this.openEdit();
+        e.preventDefault(); SELFMAIL ? this.openSelfmailCreate() : this.openEdit();
       }
+    },
+
+    // ---------- 自建郵箱管理（第二個窗口） ----------
+    async openSelfmailWindow() {
+      const r = await call('open_selfmail_window', t('selfmail.title')).catch(e => { this.toast(errText(e), 'error'); return false; });
+      if (r === null) window.open('?dev&mode=selfmail', '_blank');  // 開發模式：瀏覽器新標籤頁
+    },
+    // 兩個窗口共用後台：另一個窗口鎖定了這裡也鎖；另一個窗口解鎖了這裡自動進入
+    async syncLockState() {
+      if (this._lockChecking || !this.ready) return;
+      this._lockChecking = true;
+      try {
+        const st = await call('get_lock_state');
+        if (this.lock.unlocked && !st.unlocked) await this.lockNow();
+        else if (!this.lock.unlocked && st.unlocked && !this.lockForm.busy) {
+          Object.assign(this.lock, st);
+          this._lastActive = Date.now();
+          await this.reload();
+        }
+      } catch { /* 忽略 */ } finally { this._lockChecking = false; }
+    },
+    async selfmailSync(quiet) {
+      if (!this.mailCfg) this.mailCfg = await call('get_mail_config').catch(() => null);
+      if (!this.mailCfg?.panel_url) { if (!quiet) this.toast(t('err.admin_required'), 'error'); return; }
+      this.smSyncing = true;
+      try {
+        const r = await call('selfmail_sync');
+        await this.loadAccounts();
+        await this.refreshState();
+        if (!quiet || r.added || r.removed) this.toast(t('selfmail.synced', { n: r.total, a: r.added, u: r.updated, d: r.removed }));
+      } catch (e) { this.toast(t('selfmail.syncFailed') + errText(e), 'error'); }
+      this.smSyncing = false;
+    },
+    openSelfmailCreate() {
+      if (!this.mailCfg?.panel_url) return this.toast(t('err.admin_required'), 'error');
+      this.smCreate = { domain: this.selfDomains[0] || '', mode: 'names', names: '', count: 10, prefix: '', pwMode: 'random', password: '',
+        group_id: typeof this.filters.group === 'number' ? this.filters.group : null, busy: false, result: null };
+    },
+    smCreateCount() {
+      const c = this.smCreate;
+      return c.mode === 'names' ? c.names.split(/[\s,，;；]+/).filter(Boolean).length : Math.max(0, Math.min(500, parseInt(c.count, 10) || 0));
+    },
+    async doSelfmailCreate() {
+      const c = this.smCreate;
+      if (c.pwMode === 'fixed' && c.password.length < 8) return this.toast(t('err.selfmail_pw_short'), 'error');
+      c.busy = true;
+      try {
+        const names = c.mode === 'names' ? c.names.split(/[\s,，;；]+/).filter(Boolean) : [];
+        c.result = await call('selfmail_create', c.domain, names, c.mode === 'random' ? c.count : 0, c.prefix,
+          c.pwMode === 'fixed' ? c.password : '', c.group_id, null);
+        await this.loadAccounts();
+        await this.refreshState();
+        this.toast(t('selfmail.created2', { n: c.result.created.length, f: c.result.failed.length }), c.result.failed.length ? 'error' : 'ok');
+      } catch (e) { this.toast(errText(e), 'error'); }
+      c.busy = false;
+    },
+    copySelfmailResult() {
+      const r = this.smCreate?.result;
+      if (r) this.copy(r.created.map(x => `${x.email}----${x.password}`).join('\n'), t('copy.rows', { n: r.created.length }), true);
     },
   },
 });

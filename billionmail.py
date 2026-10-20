@@ -114,6 +114,42 @@ class BillionMailAdmin:
             return True
         raise RuntimeError(f"err.admin_create|{j.get('msg') or j.get('message') or j.get('code')}")
 
+    def all_mailboxes(self):
+        """後台裡的全部郵箱（分頁取完）：username / password / domain / local_part / full_name / quota / active / mx …"""
+        out, page = [], 1
+        while True:
+            j = self._authed("GET", f"/api/mailbox/list?page={page}&page_size=100")
+            data = j.get("data") or {}
+            lst = data.get("list") or []
+            out.extend(lst)
+            if not lst or len(out) >= int(data.get("total") or 0) or page > 200:
+                return out
+            page += 1
+
+    def get_mailbox(self, email):
+        """按地址取一個郵箱的完整信息，查不到返回 None。"""
+        j = self._authed("GET", "/api/mailbox/list?page=1&page_size=50&keyword=" + urllib.parse.quote(email))
+        for m in (j.get("data") or {}).get("list") or []:
+            if (m.get("username") or "").lower() == email.lower():
+                return m
+        return None
+
+    def update_mailbox(self, m, password=None, active=None):
+        """修改郵箱（密碼 / 啟用狀態），m 是 all_mailboxes 返回的一項，其餘字段保持原值。"""
+        body = {"domain": m.get("domain"), "local_part": m.get("local_part") or m["username"].split("@")[0],
+                "full_name": m.get("full_name") or m.get("local_part") or m["username"].split("@")[0],
+                "password": password if password is not None else (m.get("password") or ""),
+                "active": int(m.get("active", 1) if active is None else active), "isAdmin": int(m.get("is_admin") or 0),
+                "quota": int(m.get("quota") or 5242880), "quota_active": int(m.get("quota_active", 1))}
+        j = self._authed("POST", "/api/mailbox/update", body)
+        if j.get("code") not in (0, None) or j.get("success") is False:
+            raise RuntimeError(f"err.admin_update|{j.get('msg') or j.get('message') or j.get('code')}")
+
+    def delete_mailboxes(self, emails):
+        j = self._authed("POST", "/api/mailbox/delete", {"emails": list(emails)})
+        if j.get("code") not in (0, None) or j.get("success") is False:
+            raise RuntimeError(f"err.admin_delete|{j.get('msg') or j.get('message') or j.get('code')}")
+
     def list_mailboxes(self):
         """返回所有郵箱地址（測試連接用）。"""
         if not self.token:
