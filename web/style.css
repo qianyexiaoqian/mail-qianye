@@ -360,7 +360,7 @@ tr:hover .inbox-btn { visibility: visible; }
 .mail-test-result { font-size: 12px; word-break: break-all; }
 
 /* ---------- AI 助手 ---------- */
-.agent-panel { width: min(400px, 42vw); min-width: 300px; flex: none; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-height: 0; }
+.agent-panel { position: relative; width: min(400px, 42vw); min-width: 300px; flex: none; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-height: 0; }
 .agent-head { display: flex; align-items: center; gap: 8px; padding: 12px 12px 10px; border-bottom: 1px solid var(--line); }
 .agent-opts { display: flex; gap: 14px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
 .agent-opts .check { font-size: 12px; color: var(--text-2); }
@@ -387,6 +387,34 @@ tr:hover .inbox-btn { visibility: visible; }
 .agent-tool-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .agent-confirm { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 .agent-desc { white-space: pre-wrap; word-break: break-all; color: var(--text); }
+/* 對話文字可以選中複製 */
+.agent-msgs, .agent-msgs * { user-select: text; -webkit-user-select: text; }
+.agent-title { cursor: pointer; min-width: 0; }
+.agent-head .icon-btn.on { background: var(--primary-soft); color: var(--primary-2); }
+.agent-chats { position: absolute; left: 0; right: 0; top: 49px; bottom: 0; z-index: 5; background: var(--panel); overflow-y: auto; padding: 8px 10px; }
+.agent-chats-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+.agent-chat { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 6px; cursor: pointer; }
+.agent-chat:hover { background: var(--row-hover); }
+.agent-chat.active { background: var(--row-sel); box-shadow: inset 2px 0 0 var(--primary); }
+.agent-chat > .ellipsis { flex: 1; min-width: 0; }
+.agent-chat .icon-btn { visibility: hidden; }
+.agent-chat:hover .icon-btn { visibility: visible; }
+.agent-chat-time { font-size: 11px; white-space: nowrap; }
+.agent-chat-empty { padding: 20px; text-align: center; }
+.bubble-wrap { position: relative; max-width: 100%; }
+.bubble-copy { position: absolute; top: -10px; right: -6px; visibility: hidden; background: var(--panel) !important; border: 1px solid var(--line) !important; }
+.bubble-wrap:hover .bubble-copy { visibility: visible; }
+.agent-msg.user .bubble-copy { right: auto; left: -10px; }
+.agent-imgs { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 100%; }
+.agent-msg.assistant .agent-imgs { justify-content: flex-start; }
+.agent-imgs img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); cursor: zoom-in; }
+.agent-attach { display: flex; gap: 6px; padding: 8px 12px 0; flex-wrap: wrap; }
+.agent-attach-item { position: relative; }
+.agent-attach-item img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); cursor: zoom-in; }
+.agent-attach-item .icon-btn { position: absolute; top: -8px; right: -8px; background: var(--panel); border: 1px solid var(--line); border-radius: 50%; }
+.agent-clip { align-self: center; font-size: 16px; }
+.agent-viewer { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.75); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+.agent-viewer img { max-width: 92vw; max-height: 92vh; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
 .agent-thinking { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .agent-secs { font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .agent-progress { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; min-width: 0; }

@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_sheet ON accounts(sheet_id);
+CREATE TABLE IF NOT EXISTS chats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    data TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chats_mode ON chats(mode, updated_at);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -247,7 +256,12 @@ class Api:
                 plain = [old.decrypt(r[f]) if old else r[f] for f in SECRET_FIELDS]
                 updates.append([cipher.encrypt(v) for v in plain] + [r["id"]])
             sets = ", ".join(f"{f}=?" for f in SECRET_FIELDS)
+            chats = []
+            for r in conn.execute("SELECT id, title, data FROM chats").fetchall():
+                plain = [old.decrypt(r[f]) if old else r[f] for f in ("title", "data")]
+                chats.append([cipher.encrypt(v) for v in plain] + [r["id"]])
             try:
+                conn.executemany("UPDATE chats SET title=?, data=? WHERE id=?", chats)
                 conn.executemany(f"UPDATE accounts SET {sets} WHERE id=?", updates)
                 conn.executemany("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", list(settings.items()))
                 conn.commit()
@@ -912,6 +926,56 @@ class Api:
             self._save_domain_cache(good_host={domain: host})
             return result, password
         raise last_error or ConnectionError("err.mail_connect")
+
+    # ---------- AI 助手的對話記錄（標題和內容都用主密碼加密，每個窗口最多保留 CHAT_LIMIT 個） ----------
+    CHAT_LIMIT = 99
+
+    @need_unlock
+    def list_chats(self, mode=""):
+        rows = self._store.query("SELECT id, title, created_at, updated_at FROM chats WHERE mode=? ORDER BY updated_at DESC, id DESC",
+                                 (mode,))
+        for r in rows:
+            r["title"] = self._cipher.decrypt(r["title"])
+        return rows
+
+    @need_unlock
+    def get_chat(self, chat_id):
+        rows = self._store.query("SELECT * FROM chats WHERE id=?", (int(chat_id),))
+        if not rows:
+            return None
+        r = rows[0]
+        return {"id": r["id"], "title": self._cipher.decrypt(r["title"]), "updated_at": r["updated_at"],
+                "data": json.loads(self._cipher.decrypt(r["data"]) or "{}")}
+
+    @need_unlock
+    def save_chat(self, chat_id, mode, title, data):
+        """保存（chat_id 為空 = 新建），返回 id。超過 CHAT_LIMIT 個時刪掉最早的。時間用毫秒，連續保存也能排對順序。"""
+        now = int(time.time() * 1000)
+        enc_title = self._cipher.encrypt((title or "").strip()[:80])
+        enc_data = self._cipher.encrypt(json.dumps(data or {}, ensure_ascii=False))
+        st = self._store
+        with st.lock:
+            exists = chat_id and st.conn.execute("SELECT 1 FROM chats WHERE id=?", (int(chat_id),)).fetchone()
+            if exists:
+                st.conn.execute("UPDATE chats SET title=?, data=?, updated_at=? WHERE id=?", (enc_title, enc_data, now, int(chat_id)))
+                cid = int(chat_id)
+            else:
+                cid = st.conn.execute("INSERT INTO chats(mode, title, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                                      (mode or "", enc_title, enc_data, now, now)).lastrowid
+            st.conn.execute(
+                "DELETE FROM chats WHERE mode=? AND id NOT IN "
+                "(SELECT id FROM chats WHERE mode=? ORDER BY updated_at DESC, id DESC LIMIT ?)",
+                (mode or "", mode or "", self.CHAT_LIMIT))
+            st.conn.commit()
+        return cid
+
+    @need_unlock
+    def rename_chat(self, chat_id, title):
+        self._store.execute("UPDATE chats SET title=? WHERE id=?", (self._cipher.encrypt((title or "").strip()[:80]), int(chat_id)))
+
+    @need_unlock
+    def delete_chat(self, chat_id):
+        self._store.execute("DELETE FROM chats WHERE id=?", (int(chat_id),))
 
     # ---------- AI 糾錯（OpenAI 兼容接口） ----------
     _AI_DEFAULTS = {"base_url": aifix.DEFAULT_BASE_URL, "model": aifix.DEFAULT_MODEL, "prompt": ""}

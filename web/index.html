@@ -269,13 +269,28 @@
   </main>
 
   <!-- ========== AI 助手 ========== -->
-  <aside v-if="agent.open" class="agent-panel">
+  <aside v-if="agent.open" class="agent-panel" @dragover.prevent @drop.prevent="agentDrop($event)">
     <div class="agent-head">
-      <b>🤖 {{ t('agent.title') }}</b>
+      <button class="icon-btn" :class="{on: agent.showList}" :title="t('agent.chats')" @click="agentRefreshChats(); agent.showList = !agent.showList">☰</button>
+      <b class="ellipsis agent-title" :title="agent.title" @click="agentRefreshChats(); agent.showList = !agent.showList">🤖 {{ agent.title || t('agent.title') }}</b>
       <span class="spacer"></span>
+      <button class="icon-btn" :title="t('agent.newChat')" @click="agentNewChat">＋</button>
       <button class="icon-btn" :title="t('agent.transcript')" :disabled="!agent.items.length" @click="agentTranscript">📋</button>
-      <button class="icon-btn" :title="t('agent.clear')" @click="agentClear">⟲</button>
-      <button class="icon-btn" @click="agent.open = false">✕</button>
+      <button class="icon-btn" @click="toggleAgent">✕</button>
+    </div>
+    <div v-if="agent.showList" class="agent-chats">
+      <div class="agent-chats-head">
+        <span class="muted">{{ t('agent.chatsN', {n: agent.chats.length, max: 99}) }}</span>
+        <span class="spacer"></span>
+        <button class="btn sm primary" @click="agentNewChat">＋ {{ t('agent.newChat') }}</button>
+      </div>
+      <div v-for="c in agent.chats" :key="c.id" class="agent-chat" :class="{active: c.id === agent.chatId}" @click="agentOpenChat(c.id)">
+        <span class="ellipsis">{{ c.title || t('agent.untitled') }}</span>
+        <span class="muted agent-chat-time">{{ agentTime(c.updated_at) }}</span>
+        <button class="icon-btn sm" :title="t('btn.rename')" @click.stop="agentRenameChat(c)">✎</button>
+        <button class="icon-btn sm" :title="t('btn.delete')" @click.stop="agentDeleteChat(c)">✕</button>
+      </div>
+      <div v-if="!agent.chats.length" class="muted agent-chat-empty">{{ t('agent.noChats') }}</div>
     </div>
     <div class="agent-opts">
       <label class="check" :title="t('agent.autoTip')"><input type="checkbox" v-model="prefs.agentAuto"> {{ t('agent.auto') }}</label>
@@ -288,8 +303,14 @@
         <p class="muted agent-privacy">{{ t('agent.privacy') }}</p>
       </div>
       <div v-for="(m, i) in agent.items" :key="i" class="agent-msg" :class="m.role">
-        <div v-if="m.text && m.role === 'user'" class="bubble">{{ m.text }}</div>
-        <div v-else-if="m.text" class="bubble" v-html="agentMd(m.text)"></div>
+        <div v-if="m.images && m.images.length" class="agent-imgs">
+          <img v-for="(src, k) in m.images" :key="k" :src="src" alt="" @click="agent.viewer = src">
+        </div>
+        <div v-if="m.text" class="bubble-wrap">
+          <div v-if="m.role === 'user'" class="bubble">{{ m.text }}</div>
+          <div v-else class="bubble" v-html="agentMd(m.text)"></div>
+          <button class="icon-btn sm bubble-copy" :title="t('agent.copyMsg')" @click="agentCopyText(m.text)">⧉</button>
+        </div>
         <div v-for="(tc, j) in m.tools" :key="j" class="agent-tool" :class="[tc.status, {danger: tc.danger}]">
           <div class="agent-tool-row" :title="t('agent.details')" @click="tc.open = !tc.open">
             <span v-if="tc.status === 'running'" class="spinner"></span>
@@ -327,12 +348,21 @@
       </div>
     </div>
     <div v-if="agent.busy" class="agent-statusbar"><span class="spinner"></span><span class="ellipsis">{{ agentStatusText() }}</span></div>
-    <div class="agent-input">
-      <textarea ref="agentInput" v-model="agent.input" rows="3" :placeholder="t('agent.placeholder')"
-                @keydown.enter.exact.prevent="agentSend()"></textarea>
-      <button v-if="agent.busy" class="btn" @click="agentStop">⏹ {{ t('import.aiStop') }}</button>
-      <button v-else class="btn primary" :disabled="!agent.input.trim()" @click="agentSend()">{{ t('agent.send') }}</button>
+    <div v-if="agent.images.length" class="agent-attach">
+      <div v-for="(src, k) in agent.images" :key="k" class="agent-attach-item">
+        <img :src="src" alt="" @click="agent.viewer = src">
+        <button class="icon-btn sm" @click="agent.images.splice(k, 1)">✕</button>
+      </div>
     </div>
+    <div class="agent-input">
+      <button class="icon-btn agent-clip" :title="t('agent.attach')" @click="$refs.agentFile.click()">📎</button>
+      <input ref="agentFile" type="file" accept="image/*" multiple style="display:none" @change="agentPickImages">
+      <textarea ref="agentInput" v-model="agent.input" rows="3" :placeholder="t('agent.placeholder')"
+                @keydown.enter.exact.prevent="agentSend()" @paste="agentPaste"></textarea>
+      <button v-if="agent.busy" class="btn" @click="agentStop">⏹ {{ t('import.aiStop') }}</button>
+      <button v-else class="btn primary" :disabled="!agent.input.trim() && !agent.images.length" @click="agentSend()">{{ t('agent.send') }}</button>
+    </div>
+    <div v-if="agent.viewer" class="agent-viewer" @click="agent.viewer = ''"><img :src="agent.viewer" alt=""></div>
   </aside>
 
   <!-- ========== 單元格浮層編輯 ========== -->

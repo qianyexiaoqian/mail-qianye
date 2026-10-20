@@ -8,6 +8,8 @@
 const AGENT_MAX_STEPS = 30;
 const AGENT_HISTORY_LIMIT = 150000;  // 對話歷史超過這麼多字符就丟掉最早的幾輪
 const AGENT_UNDO_LIMIT = 30;
+const AGENT_MAX_IMAGES = 4;  // 每條消息最多附幾張圖
+const AGENT_IMAGE_MAX = 1280;  // 圖片縮到這個邊長再發送和保存
 const AGENT_TEXT_FIELDS = ['email', 'password', 'totp_secret', 'recovery_email', 'recovery_password',
   'oauth_client_id', 'oauth_token', 'phone', 'notes'];
 const AGENT_SECRET_FIELDS = ['password', 'totp_secret', 'recovery_password', 'oauth_token'];
@@ -179,7 +181,9 @@ function agentConfirmLevel(name, args) {
 
 const AgentMixin = {
   data() {
-    return { agent: { open: false, items: [], history: [], input: '', busy: false, stop: false, undo: [] } };
+    return { agent: { open: false, items: [], history: [], input: '', busy: false, stop: false, undo: [],
+      // 多對話：chatId = 當前對話（null = 還沒保存的新對話），chats = 對話列表，images = 待發送的圖片
+      chatId: null, title: '', chats: [], showList: false, images: [], viewer: '', token: 0 } };
   },
 
   computed: {
@@ -193,12 +197,116 @@ const AgentMixin = {
     // ---------- 面板 ----------
     toggleAgent() {
       this.agent.open = !this.agent.open;
-      if (this.agent.open) nextTick(() => this.$refs.agentInput?.focus());
+      this.prefs.agentOpen = this.agent.open;
+      if (this.agent.open) { nextTick(() => this.$refs.agentInput?.focus()); this.agentScroll(); }
     },
-    agentClear() {
+    // 鎖定時清掉內存裡的對話（已經加密保存在數據庫，解鎖後恢復）
+    agentReset() {
       this.agentStop();
-      Object.assign(this.agent, { items: [], history: [], busy: false, stop: false, undo: [] });
+      Object.assign(this.agent, { items: [], history: [], busy: false, stop: false, undo: [], chatId: null, title: '',
+        chats: [], showList: false, images: [], viewer: '', token: this.agent.token + 1 });
     },
+
+    // ---------- 多對話：保存 / 恢復 / 切換 ----------
+    // 解鎖後調用：載入對話列表，恢復上次的對話和面板狀態
+    async agentInit() {
+      try {
+        this.agent.chats = await call('list_chats', MODE);
+        const id = this.prefs.agentChatId;
+        if (id && this.agent.chats.some(c => c.id === id)) await this.agentOpenChat(id);
+        if (this.prefs.agentOpen) this.agent.open = true;
+      } catch { /* 忽略 */ }
+    },
+    async agentRefreshChats() {
+      try { this.agent.chats = await call('list_chats', MODE); } catch { /* 忽略 */ }
+    },
+    async agentOpenChat(id) {
+      const agent = this.agent;
+      if (agent.busy) return this.toast(t('agent.busySwitch'), 'error');
+      const c = await call('get_chat', id);
+      if (!c) { await this.agentRefreshChats(); return; }
+      const d = c.data || {};
+      // 上次關閉時還在執行 / 等確認的操作，標記為已中斷
+      for (const m of d.items || []) {
+        m.streaming = false;
+        for (const tc of m.tools || []) {
+          if (tc.status === 'running' || tc.status === 'confirm') { tc.status = 'error'; tc.summary = t('agent.interrupted'); }
+        }
+      }
+      Object.assign(agent, { items: d.items || [], history: d.history || [], undo: d.undo || [], chatId: c.id, title: c.title,
+        showList: false, images: [], token: agent.token + 1 });
+      this.prefs.agentChatId = c.id;
+      this.agentScroll();
+    },
+    agentNewChat() {
+      const agent = this.agent;
+      if (agent.busy) return this.toast(t('agent.busySwitch'), 'error');
+      clearTimeout(this._agentSaveTimer);
+      if (agent.items.length) this.agentSaveNow();  // 先把當前對話存好
+      Object.assign(agent, { items: [], history: [], undo: [], chatId: null, title: '', showList: false, images: [], input: '',
+        token: agent.token + 1 });
+      this.prefs.agentChatId = null;
+      nextTick(() => this.$refs.agentInput?.focus());
+    },
+    async agentDeleteChat(c) {
+      if (!(await this.confirm(t('agent.deleteChat'), t('agent.deleteChatConfirm', { s: c.title || t('agent.untitled') })))) return;
+      await call('delete_chat', c.id);
+      if (c.id === this.agent.chatId) {
+        Object.assign(this.agent, { items: [], history: [], undo: [], chatId: null, title: '', token: this.agent.token + 1 });
+        this.prefs.agentChatId = null;
+      }
+      await this.agentRefreshChats();
+    },
+    async agentRenameChat(c) {
+      const name = await this.prompt(t('agent.renameChat'), '', c.title);
+      if (!name) return;
+      await call('rename_chat', c.id, name);
+      if (c.id === this.agent.chatId) this.agent.title = name;
+      await this.agentRefreshChats();
+    },
+    agentAutoTitle() {
+      const first = this.agent.items.find(m => m.role === 'user');
+      const text = (first?.text || '').split('\n').map(x => x.trim()).find(Boolean) || '';
+      return text.slice(0, 40) || (first?.images?.length ? t('agent.imageMsg') : t('agent.untitled'));
+    },
+    // 對話有變化就保存（防抖）
+    agentSaveSoon() {
+      clearTimeout(this._agentSaveTimer);
+      this._agentSaveTimer = setTimeout(() => this.agentSaveNow(), 600);
+    },
+    async agentSaveNow() {
+      const agent = this.agent;
+      if (!agent.items.length || !this.lock.unlocked) return;
+      const token = agent.token;
+      if (!agent.title) agent.title = this.agentAutoTitle();
+      const data = JSON.parse(JSON.stringify({ items: agent.items, history: agent.history, undo: agent.undo }));
+      try {
+        const id = await call('save_chat', agent.chatId, MODE, agent.title, data);
+        if (agent.token === token && !agent.chatId) agent.chatId = id;  // 保存期間切換了對話就不改
+        if (agent.token === token) this.prefs.agentChatId = id;
+        await this.agentRefreshChats();
+      } catch { /* 鎖定了等情況，忽略 */ }
+    },
+    agentTime(ms) {
+      const d = new Date(ms), now = new Date(), p = n => String(n).padStart(2, '0');
+      return d.toDateString() === now.toDateString() ? `${p(d.getHours())}:${p(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`;
+    },
+
+    // ---------- 圖片消息 ----------
+    async agentAttach(files) {
+      for (const f of files || []) {
+        if (!f || !f.type?.startsWith('image/')) continue;
+        if (this.agent.images.length >= AGENT_MAX_IMAGES) { this.toast(t('agent.tooManyImages', { n: AGENT_MAX_IMAGES }), 'error'); break; }
+        try { this.agent.images.push(await fileToThumb(f, AGENT_IMAGE_MAX)); } catch { this.toast(t('cell.imageFailed'), 'error'); }
+      }
+    },
+    agentPaste(e) {
+      const files = [...(e.clipboardData?.items || [])].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile());
+      if (files.length) { e.preventDefault(); this.agentAttach(files); }
+    },
+    agentDrop(e) { this.agentAttach([...(e.dataTransfer?.files || [])]); },
+    agentPickImages(e) { this.agentAttach([...(e.target.files || [])]); e.target.value = ''; },
+    agentCopyText(text) { this.copy(text, t('agent.message')); },
     agentStop() {
       if (!this.agent.busy) return;
       this.agent.stop = true;
@@ -221,7 +329,7 @@ const AgentMixin = {
     agentTranscript() {
       const lines = [];
       for (const m of this.agent.items) {
-        if (m.role === 'user') lines.push(`【${t('agent.you')}】\n${m.text}`);
+        if (m.role === 'user') lines.push(`【${t('agent.you')}】\n${m.text}${m.images?.length ? `\n[${t('agent.imageMsg')} ×${m.images.length}]` : ''}`);
         else {
           if (m.text) lines.push(`【AI】\n${m.text}`);
           for (const tc of m.tools || []) lines.push(`  → ${tc.name} ${tc.args}\n  ← ${tc.status}: ${(tc.result || tc.summary || '').slice(0, 1500)}`);
@@ -240,14 +348,20 @@ const AgentMixin = {
     // ---------- 對話循環 ----------
     async agentSend(text) {
       const agent = this.agent;
+      const fromInput = text === undefined;
       text = (text ?? agent.input).trim();
-      if (!text || agent.busy) return;
+      const images = fromInput ? [...agent.images] : [];
+      if ((!text && !images.length) || agent.busy) return;
       try {
         if (!aiConfigured(await call('get_ai_config'))) return this.toast(t('import.aiNoConfig'), 'error');
       } catch (e) { return this.toast(errText(e), 'error'); }
-      agent.input = '';
-      agent.items.push({ role: 'user', text, tools: [] });
-      agent.history.push({ role: 'user', content: text });
+      if (fromInput) { agent.input = ''; agent.images = []; }
+      agent.items.push({ role: 'user', text, images, tools: [] });
+      // 帶圖片時按 OpenAI 多模態格式發送（模型需要支持識圖）
+      agent.history.push({ role: 'user', content: images.length
+        ? [{ type: 'text', text: text || t('agent.imageOnly') }, ...images.map(url => ({ type: 'image_url', image_url: { url } }))]
+        : text });
+      this.agentSaveSoon();
       agent.busy = true;
       agent.stop = false;
       this.agentScroll();
@@ -256,12 +370,14 @@ const AgentMixin = {
       } finally {
         agent.busy = false;
         agent.stop = false;
+        this.agentSaveSoon();
       }
     },
     // 歷史太長時丟掉最早的幾輪（從一條用戶消息開始截，保證工具調用和結果成對）
     agentTrimHistory() {
       const h = this.agent.history;
-      while (JSON.stringify(h).length > AGENT_HISTORY_LIMIT && h.length > 2) {
+      const size = () => JSON.stringify(h, (k, v) => (k === 'url' && typeof v === 'string' && v.startsWith('data:') ? 'x'.repeat(3000) : v)).length;
+      while (size() > AGENT_HISTORY_LIMIT && h.length > 2) {
         let i = h.findIndex((m, k) => k > 0 && m.role === 'user');
         if (i <= 0) break;
         h.splice(0, i);
@@ -312,6 +428,7 @@ const AgentMixin = {
           const content = JSON.stringify(out).slice(0, 30000);
           tc.result = content;
           agent.history.push({ role: 'tool', tool_call_id: c.id, content });
+          this.agentSaveSoon();
         }
         if (agent.stop) return;
       }
@@ -535,6 +652,7 @@ ${SELFMAIL ? `
       if (rows.length) await call('restore_accounts', rows);
       for (const m of this.agent.items) for (const tc of m.tools || []) if (tc.undoId === u.id) { tc.undoId = ''; tc.undone = true; }
       await this.reload();
+      this.agentSaveSoon();
       return { undone: u.label, remaining: list.map(x => ({ id: x.id, label: x.label })) };
     },
 

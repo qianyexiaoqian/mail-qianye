@@ -98,7 +98,7 @@ function fileToThumb(file, max = 128) {
         canvas.width = Math.max(1, Math.round(img.width * scale));
         canvas.height = Math.max(1, Math.round(img.height * scale));
         canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-        let url = canvas.toDataURL('image/webp', 0.85);
+        let url = canvas.toDataURL('image/webp', max > 256 ? 0.82 : 0.85);
         if (!url.startsWith('data:image/webp')) url = canvas.toDataURL('image/png');
         resolve(url);
       };
@@ -421,7 +421,8 @@ const app = createApp({
     async lockNow() {
       this._restore = { page: this.page, scroll: this.$refs.tableWrap?.scrollTop || 0 };
       this.closeInbox();
-      this.agentClear();  // 對話裡有郵箱數據
+      this.agentReset();  // 對話裡有郵箱數據（已加密保存，解鎖後恢復）
+      this._agentInited = false;
       this.agent.open = false;
       await call('lock');
       // 清掉內存裡的明文
@@ -636,6 +637,7 @@ const app = createApp({
       if (typeof this.filters.group === 'number' && !this.groupMap[this.filters.group]) this.filters.group = '';
       await this.loadAccounts();
       if (SELFMAIL && !this._synced) { this._synced = true; this.selfmailSync(true); }  // 打開窗口時自動同步一次
+      if (!this._agentInited) { this._agentInited = true; this.agentInit(); }  // 恢復 AI 助手上次的對話
       if (this._restore) {
         const r = this._restore;
         this._restore = null;
