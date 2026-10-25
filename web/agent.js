@@ -55,7 +55,10 @@ const AGENT_SET = {
   description: '要修改的字段。字符串可用模板 {email} {user}（郵箱用戶名）{domain} {index}（序號）{random}（隨機密碼）',
   properties: {
     ...AGENT_ACCOUNT_FIELDS, status: AGENT_STR,
-    group: { type: 'string', description: '分組名，不存在會自動創建；空字符串 = 移出分組' },
+    group: { type: 'string', description: '只放在這一個分組（替換原有的所有分組），不存在自動創建；空字符串 = 移出所有分組' },
+    groups: { type: 'array', items: AGENT_STR, description: '只放在這幾個分組（替換原有的）' },
+    add_groups: { type: 'array', items: AGENT_STR, description: '加入這些分組（保留原有分組），不存在自動創建' },
+    remove_groups: { type: 'array', items: AGENT_STR, description: '移出這些分組（其他分組保留）' },
     append_notes: { type: 'string', description: '追加到備註末尾（換行分隔）' },
   },
 };
@@ -79,7 +82,7 @@ const AGENT_COLUMNS = {
 };
 const AGENT_NEW_ACCOUNT = {
   type: 'object',
-  properties: { ...AGENT_ACCOUNT_FIELDS, status: AGENT_STR, group: AGENT_STR, country: { type: 'string', description: '國家/地區，寫入國家列（沒有會自動新建）' }, columns: AGENT_COLUMNS },
+  properties: { ...AGENT_ACCOUNT_FIELDS, status: AGENT_STR, group: AGENT_STR, groups: { type: 'array', items: AGENT_STR, description: '加入多個分組' }, country: { type: 'string', description: '國家/地區，寫入國家列（沒有會自動新建）' }, columns: AGENT_COLUMNS },
   required: ['email'],
 };
 
@@ -581,7 +584,8 @@ const AgentMixin = {
 - 先根據「當前狀態」裡的 groups（側邊欄分組，按顯示順序）、sheets（列表）、columns（表格列）判斷用戶說的名字指的是什麼：
   · 名字是某個分組 / 列表的名稱（例如「分組 29」「分組名稱 29」「29 這個分組」），「移到第一 / 最前 / 置頂 / 第 N 個 / 上移 / 下移 / 放最後」就是調整它在側邊欄的順序（manage_groups / manage_sheets 的 move）——即使用戶說的是「第一列」，這裡的「列」只是口語的「第一位」。
   · 只有名字是表格列名（序號、郵箱、密碼、分組列、備註、自定義列…）時，才是調整表格的列（manage_columns）。
-  · 「把郵箱放進 / 移到 29 分組」是改郵箱的分組（update_accounts set.group），不是調整分組順序。
+  · 「把郵箱放進 / 加到 29 分組」是改郵箱的分組，不是調整分組順序。
+- 一個郵箱可以同時在多個分組：「加入 / 也放進 X 分組」用 set.add_groups（保留原有分組）；「從 X 分組移出」用 set.remove_groups；「只放在 X / 改成 X 分組」才用 set.group 或 set.groups（替換全部）；「移出所有分組」用 set.group=""。篩選「在 X 分組裡的」用 conditions {field:"group", op:"eq", value:"X"}。
   · 名字同時能對上兩種、又看不出指哪個時，簡短地問一句再做。
 - 用戶糾正你（「不是這個意思」「我說的是…」「錯了」）：先用 undo 撤銷剛才理解錯的那一步，再按正確的理解重新做，並說明已撤銷了什麼。
 - 多步任務就連續調用多個工具一次做完。信息不足時先用查詢類工具弄清楚；只有確實無法判斷用戶意圖時才提問。
@@ -842,7 +846,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       if (AGENT_TEXT_FIELDS.includes(f)) return a[f] || '';
       switch (f) {
         case 'status': return a.status;
-        case 'group': return this.groupMap[a.group_id]?.name || '';
+        case 'group': return this.accGroupNames(a).join(', ');
         case 'domain': return domainOf(a.email);
         case 'recovery_domain': return domainOf(a.recovery_email);
         case 'created_at': return a.created_at;
@@ -859,6 +863,13 @@ ${learned ? '\n' + learned + '\n' : ''}
       const op = c.op;
       if (AGENT_SECRET_FIELDS.includes(field) && !this.prefs.agentSecrets && !['empty', 'not_empty'].includes(op)) {
         throw new Error(`${field} only supports empty / not_empty (reading secrets is not allowed)`);
+      }
+      if (field === 'group' && ['eq', 'ne', 'in'].includes(op)) {
+        const names = this.accGroupNames(a).map(x => x.toLowerCase());
+        const wants = (op === 'in' ? (Array.isArray(c.value) ? c.value : String(c.value).split(/[,，]/)) : [c.value])
+          .map(x => String(x ?? '').trim().toLowerCase());
+        const hit = wants.some(w => (w === '' || w === 'none' ? !names.length : names.includes(w)));
+        return op === 'ne' ? !hit : hit;
       }
       if (op === 'empty') return !v;
       if (op === 'not_empty') return !!v;
@@ -898,7 +909,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const want = f => all || fields.includes(f);
       for (const f of ['email', 'recovery_email', 'phone', 'oauth_client_id']) if (want(f) && (a[f] || !all)) out[f] = a[f] || '';
       if (want('status')) out.status = this.statusLabel(a.status);
-      if (want('group')) out.group = this.groupMap[a.group_id]?.name || '';
+      if (want('group') || want('groups')) out.groups = this.accGroupNames(a);
       if (want('notes') && (a.notes || !all)) out.notes = (a.notes || '').slice(0, 300);
       for (const f of AGENT_SECRET_FIELDS) {
         if (secrets && (all || want(f))) out[f] = a[f] || '';
@@ -999,6 +1010,14 @@ ${learned ? '\n' + learned + '\n' : ''}
       const rows = this.agentRows(args.filter);
       if (!args.group_by) return { total: rows.length };
       const counts = {};
+      if (args.group_by === 'group') {
+        for (const a of rows) {
+          const names = this.accGroupNames(a);
+          for (const n of names.length ? names : ['(empty)']) counts[n] = (counts[n] || 0) + 1;
+        }
+        const groups = Object.entries(counts).sort((x, y) => y[1] - x[1]).map(([value, count]) => ({ value, count }));
+        return { total: rows.length, groups, note: 'an account can be in several groups, so counts may add up to more than total' };
+      }
       for (const a of rows) {
         let v = this.agentField(a, args.group_by);
         if (v === undefined) throw new Error(`unknown field "${args.group_by}"`);
@@ -1103,7 +1122,8 @@ ${learned ? '\n' + learned + '\n' : ''}
         }
         row.email = email;
         const columns = { ...(raw.columns || {}) };
-        prepared.push({ row, columns, country: raw.country, status: raw.status || opts.status, group: raw.group ?? opts.group });
+        const groups = [...(raw.groups || []), ...(raw.group != null ? [raw.group] : (raw.groups ? [] : [opts.group]))].filter(x => x != null && x !== '');
+        prepared.push({ row, columns, country: raw.country, status: raw.status || opts.status, groups });
       }
       // 自定義列、國家列
       for (const p of prepared) {
@@ -1119,19 +1139,19 @@ ${learned ? '\n' + learned + '\n' : ''}
         }
         p.row.extra = extra;
       }
-      // 按狀態 + 分組分批導入
+      // 每行帶自己的分組（可多個），按狀態分批導入
       const buckets = new Map();
       for (const p of prepared) {
         const status = p.status ? this.agentStatusOrThrow(p.status) : this.meta.statuses[0];
-        const gid = await this.agentGroupId(p.group, true);
-        const key = status + '|' + gid;
-        if (!buckets.has(key)) buckets.set(key, { status, gid, rows: [] });
-        buckets.get(key).rows.push(p.row);
+        p.row.group_ids = [];
+        for (const n of p.groups) { const id = await this.agentGroupId(n, true); if (id && !p.row.group_ids.includes(id)) p.row.group_ids.push(id); }
+        if (!buckets.has(status)) buckets.set(status, { status, rows: [] });
+        buckets.get(status).rows.push(p.row);
       }
       let added = 0, skipped = 0;
       const ids = [];
       for (const b of buckets.values()) {
-        const r = await call('import_rows', this.sheetId, b.rows, b.gid, b.status, opts.skip_duplicates !== false, {});
+        const r = await call('import_rows', this.sheetId, b.rows, null, b.status, opts.skip_duplicates !== false, {});
         added += r.added; skipped += r.skipped; ids.push(...(r.ids || []));
       }
       const undoId = ids.length ? this.agentPushUndo(t('agent.tool.add_accounts') + ' ' + ids.length, { addedIds: ids }) : '';
@@ -1173,7 +1193,16 @@ ${learned ? '\n' + learned + '\n' : ''}
         const ids = job.rows.map(a => a.id);
         const set = job.set;
         if (set.status != null && set.status !== '') await call('set_status', ids, this.agentStatusOrThrow(set.status));
-        if (set.group != null) await call('set_group', ids, await this.agentGroupId(set.group, true));
+        if (set.groups != null) {
+          const gids = [];
+          for (const n of set.groups) { const id = await this.agentGroupId(n, true); if (id) gids.push(id); }
+          await call('set_groups', ids, gids);
+        } else if (set.group != null) {
+          const id = await this.agentGroupId(set.group, true);
+          await call('set_groups', ids, id ? [id] : []);
+        }
+        for (const n of set.add_groups || []) { const id = await this.agentGroupId(n, true); if (id) await call('add_to_group', ids, id); }
+        for (const n of set.remove_groups || []) { const id = await this.agentGroupId(n, false).catch(() => null); if (id) await call('remove_from_group', ids, id); }
         const fieldKeys = AGENT_TEXT_FIELDS.filter(f => set[f] != null);
         const fieldEdits = job.edits.filter(e => this.agentEditTarget(e.field).field);
         if (fieldKeys.length || set.append_notes || fieldEdits.length) {
@@ -1630,7 +1659,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const rows = this.accounts.filter(a => made.has(a.email.toLowerCase()));
       const out = { created: r.created.length, emails: r.created.map(x => x.email), failed: r.failed, in_list: rows.length,
         note: 'passwords are saved in the table; use copy_to_clipboard to copy email----password' };
-      if (gid) out.in_group = rows.filter(a => a.group_id === gid).length;
+      if (gid) out.in_group = rows.filter(a => this.accGroups(a).includes(gid)).length;
       return out;
     },
     // 面板底部的實時狀態：思考中 / 正在準備指令 / 執行中（進度）/ 等待確認

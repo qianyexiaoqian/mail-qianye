@@ -255,7 +255,9 @@ const app = createApp({
     groupCounts() {
       const m = { none: 0 };
       for (const a of this.accounts) {
-        if (a.group_id && this.groupMap[a.group_id]) m[a.group_id] = (m[a.group_id] || 0) + 1; else m.none++;
+        const gs = this.accGroups(a);
+        if (!gs.length) m.none++;
+        for (const g of gs) m[g] = (m[g] || 0) + 1;
       }
       return m;
     },
@@ -284,7 +286,7 @@ const app = createApp({
       const countrySet = new Set(this.countryFilterCodes);
       return this.accounts.filter(a => {
         if (countryOn && !this.countryColumns.some(c => countrySet.has(a.extra?.[c.id]))) return false;
-        if (f.group === 'none' ? (a.group_id && this.groupMap[a.group_id]) : (f.group && a.group_id !== f.group)) return false;
+        if (f.group === 'none' ? this.accGroups(a).length : (f.group && !this.accGroups(a).includes(f.group))) return false;
         if (f.status && a.status !== f.status) return false;
         if (f.domain && domainOf(a.email) !== f.domain) return false;
         if (f.twofa && (f.twofa === 'yes') !== !!a.totp_secret) return false;
@@ -688,7 +690,7 @@ const app = createApp({
       const { key, dir } = this.sort;
       if (!key) return list;
       const val = a => {
-        if (key === 'group') return this.groupMap[a.group_id]?.name || '';
+        if (key === 'group') return this.accGroupNames(a).join(', ').toLowerCase();
         if (key === 'updated') return a.updated_at;
         if (key === 'status') return this.statusIndex(a.status);
         if (key.startsWith('x_')) return String(a.extra[key.slice(2)] || '').toLowerCase();
@@ -700,7 +702,7 @@ const app = createApp({
       });
     },
     searchFields(a) {
-      const out = [a.email, a.recovery_email, a.phone, a.notes, this.groupMap[a.group_id]?.name || '', this.statusLabel(a.status)];
+      const out = [a.email, a.recovery_email, a.phone, a.notes, this.accGroupNames(a).join(' '), this.statusLabel(a.status)];
       for (const col of this.currentSheet.columns) {
         const v = a.extra?.[col.id];
         if (!v || col.type === 'image' || col.type === 'color') continue;
@@ -908,6 +910,31 @@ const app = createApp({
     },
 
     // ---------- 自定義列：點擊單元格 ----------
+    // ---------- 分組（一個郵箱可以在多個分組） ----------
+    accGroups(a) { return (a?.group_ids || (a?.group_id ? [a.group_id] : [])).filter(id => this.groupMap[id]); },
+    accGroupNames(a) { return this.accGroups(a).map(id => this.groupMap[id].name); },
+    toggleEditGroup(id) {
+      const list = this.edit.group_ids;
+      const i = list.indexOf(id);
+      if (i >= 0) list.splice(i, 1); else list.push(id);
+    },
+    openGroupPop(a, e) {
+      const r = e.currentTarget.getBoundingClientRect();
+      const w = 240, h = Math.min(320, 60 + this.groups.length * 32);
+      const x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+      const y = r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+      this.pop = { kind: 'groups', account: a, x, y };
+    },
+    async toggleAccountGroup(a, id) {
+      const on = this.accGroups(a).includes(id);
+      try {
+        await call(on ? 'remove_from_group' : 'add_to_group', [a.id], id);
+        a.group_ids = on ? this.accGroups(a).filter(x => x !== id) : [...this.accGroups(a), id];
+        a.group_id = a.group_ids[0] || null;
+        this.refreshState();
+      } catch (err) { this.toast(errText(err), 'error'); }
+    },
+
     // ---------- 備用碼（一次性驗證碼，一行一個，已用的前面有「~」） ----------
     backupList(a) {
       return String(a?.backup_codes || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)
@@ -987,10 +1014,10 @@ const app = createApp({
       this.pop = null;
       this.recType = '';
       this.edit = a
-        ? { ...a, extra: { ...a.extra } }
+        ? { ...a, extra: { ...a.extra }, group_ids: [...this.accGroups(a)] }
         : { sheet_id: this.sheetId, email: '', password: '', totp_secret: '', recovery_email: '', recovery_password: '',
             oauth_client_id: '', oauth_token: '', phone: '', notes: '', backup_codes: '',
-            status: this.meta.statuses[0], group_id: typeof this.filters.group === 'number' ? this.filters.group : null, extra: {} };
+            status: this.meta.statuses[0], group_ids: typeof this.filters.group === 'number' ? [this.filters.group] : [], extra: {} };
       this.refreshEditCode(this.edit.totp_secret);
       nextTick(() => this.focusEditField(focus));
     },
@@ -1055,7 +1082,12 @@ const app = createApp({
     async bulkGroup(e) {
       const v = e.target.value; e.target.value = '';
       if (!v) return;
-      await call('set_group', this.selectedIds, v === 'none' ? null : Number(v));
+      const [mode, id] = v.split(':');
+      const gid = Number(id);
+      if (mode === 'add') await call('add_to_group', this.selectedIds, gid);
+      else if (mode === 'remove') await call('remove_from_group', this.selectedIds, gid);
+      else if (mode === 'set') await call('set_groups', this.selectedIds, [gid]);
+      else await call('set_groups', this.selectedIds, []);
       await this.afterBulk(t('bulk.groupDone'), false);
     },
     async bulkStatus(e) {
@@ -1202,7 +1234,7 @@ const app = createApp({
       const cols = this.currentSheet.columns.filter(c => c.type !== 'image');
       const esc = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
       const head = [...this.meta.fields.map(f => t('col.' + f)), t('col.group'), t('col.status'), ...cols.map(c => c.name)];
-      const lines = rows.map(a => [...this.meta.fields.map(f => a[f]), this.groupMap[a.group_id]?.name || '', this.statusLabel(a.status),
+      const lines = rows.map(a => [...this.meta.fields.map(f => a[f]), this.accGroupNames(a).join(' / '), this.statusLabel(a.status),
         ...cols.map(c => a.extra[c.id] || '')]);
       return '﻿' + [head, ...lines].map(r => r.map(esc).join(',')).join('\r\n');  // BOM 讓 Excel 正確識別 UTF-8
     },

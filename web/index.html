@@ -156,7 +156,9 @@
       <span v-html="t('bulk.selected', {n: '<b>' + selectedIds.length + '</b>'})"></span>
       <select @change="bulkGroup($event)">
         <option value="">{{ t('bulk.setGroup') }}</option>
-        <option v-for="g in groups" :value="g.id">{{ g.name }}</option>
+        <optgroup :label="t('bulk.addGroup')"><option v-for="g in groups" :key="'a' + g.id" :value="'add:' + g.id">＋ {{ g.name }}</option></optgroup>
+        <optgroup :label="t('bulk.removeGroup')"><option v-for="g in groups" :key="'r' + g.id" :value="'remove:' + g.id">－ {{ g.name }}</option></optgroup>
+        <optgroup :label="t('bulk.onlyGroup')"><option v-for="g in groups" :key="'s' + g.id" :value="'set:' + g.id">＝ {{ g.name }}</option></optgroup>
         <option value="none">{{ t('bulk.ungroup') }}</option>
       </select>
       <select @change="bulkStatus($event)">
@@ -231,7 +233,10 @@
                         :title="t('mail.open')" @click="openInbox(a, 'recovery')">📥</button>
               </template>
               <template v-else-if="c.key === 'group'">
-                <span v-if="groupMap[a.group_id]" class="tag" :style="tagStyle(groupMap[a.group_id].color)">{{ groupMap[a.group_id].name }}</span>
+                <span class="group-cell" :title="accGroupNames(a).join('、') || t('group.clickToSet')" @click="openGroupPop(a, $event)">
+                  <span v-for="gid in accGroups(a)" :key="gid" class="tag" :style="tagStyle(groupMap[gid].color)">{{ groupMap[gid].name }}</span>
+                  <span v-if="!accGroups(a).length" class="muted add-note">{{ t('group.add1') }}</span>
+                </span>
               </template>
               <template v-else-if="c.key === 'status'">
                 <span class="status" :class="'st-' + statusIndex(a.status)">{{ statusLabel(a.status) }}</span>
@@ -382,7 +387,16 @@
   </aside>
 
   <!-- ========== 單元格浮層編輯 ========== -->
-  <div v-if="pop && pop.kind === 'backup'" ref="popEl" class="popover bc-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+  <div v-if="pop && pop.kind === 'groups'" ref="popEl" class="popover group-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+    <div class="popover-title">{{ t('col.group') }} · {{ pop.account.email }}</div>
+    <label v-for="g in groups" :key="g.id" class="check group-pop-item">
+      <input type="checkbox" :checked="accGroups(pop.account).includes(g.id)" @change="toggleAccountGroup(pop.account, g.id)">
+      <span class="dot" :style="{background: g.color}"></span>{{ g.name }}
+    </label>
+    <div v-if="!groups.length" class="muted">{{ t('group.noGroups') }}</div>
+    <div class="editor-row" style="margin-top:6px"><button class="link" @click="pop = null; openGroups()">⚙ {{ t('group.manage') }}</button></div>
+  </div>
+  <div v-else-if="pop && pop.kind === 'backup'" ref="popEl" class="popover bc-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
     <div class="popover-title">{{ t('col.backup_codes') }} · {{ pop.account.email }}</div>
     <div class="editor-row">
       <b>{{ t('bc.left', {n: backupLeft(pop.account), total: backupList(pop.account).length}) }}</b>
@@ -506,7 +520,12 @@
         <label>{{ t('col.oauth_token') }}<input v-model="edit.oauth_token" data-field="oauth_token" class="mono" placeholder="refresh token"></label>
         <label>{{ t('col.phone') }}<input v-model="edit.phone" data-field="phone" class="mono"></label>
         <label>{{ t('col.group') }}
-          <select v-model="edit.group_id" data-field="group"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
+          <div class="group-pick" data-field="group">
+            <button v-for="g in groups" :key="g.id" type="button" class="tag group-chip" :class="{on: edit.group_ids.includes(g.id)}"
+                    :style="edit.group_ids.includes(g.id) ? tagStyle(g.color) : null" @click="toggleEditGroup(g.id)">
+              {{ edit.group_ids.includes(g.id) ? '✓ ' : '' }}{{ g.name }}</button>
+            <span v-if="!groups.length" class="muted">{{ t('group.noGroups') }}</span>
+          </div>
         </label>
         <label>{{ t('col.status') }}
           <select v-model="edit.status" data-field="status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>

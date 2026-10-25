@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_sheet ON accounts(sheet_id);
+CREATE TABLE IF NOT EXISTS account_groups (
+    account_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    PRIMARY KEY (account_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_account_groups_group ON account_groups(group_id);
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mode TEXT NOT NULL DEFAULT '',
@@ -176,6 +182,11 @@ class Store:
         # 列表類型：'' = 普通列表，'selfmail' = 自建郵箱管理窗口用的列表（和 BillionMail 後台同步）
         if "kind" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(sheets)")}:
             self.conn.execute("ALTER TABLE sheets ADD COLUMN kind TEXT NOT NULL DEFAULT ''")
+        # 分組改成多對多：把舊的單個分組搬進 account_groups（只做一次）
+        if not self.conn.execute("SELECT 1 FROM settings WHERE key='multi_group'").fetchone():
+            self.conn.execute("INSERT OR IGNORE INTO account_groups(account_id, group_id) "
+                              "SELECT id, group_id FROM accounts WHERE group_id IS NOT NULL")
+            self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('multi_group', '1')")
         self.conn.commit()
 
     def query(self, sql, args=()):
@@ -380,7 +391,7 @@ class Api:
         for s in sheets:
             s["columns"] = [normalize_column(c) for c in json.loads(s["columns"] or "[]")]
         groups = self._store.query(
-            "SELECT g.*, (SELECT COUNT(*) FROM accounts a WHERE a.group_id = g.id) AS count "
+            "SELECT g.*, (SELECT COUNT(*) FROM account_groups ag WHERE ag.group_id = g.id) AS count "
             "FROM groups g ORDER BY sort, id"
         )
         return {"sheets": sheets, "groups": groups}
@@ -406,6 +417,7 @@ class Api:
     def delete_sheet(self, sheet_id):
         if len(self._store.query("SELECT id FROM sheets")) <= 1:
             raise ValueError("err.keep_one_sheet")
+        self._store.execute("DELETE FROM account_groups WHERE account_id IN (SELECT id FROM accounts WHERE sheet_id=?)", (sheet_id,))
         self._store.execute("DELETE FROM accounts WHERE sheet_id=?", (sheet_id,))
         self._store.execute("DELETE FROM sheets WHERE id=?", (sheet_id,))
 
@@ -430,15 +442,84 @@ class Api:
 
     @need_unlock
     def delete_group(self, group_id):
-        self._store.execute("UPDATE accounts SET group_id=NULL WHERE group_id=?", (group_id,))
-        self._store.execute("DELETE FROM groups WHERE id=?", (group_id,))
+        st = self._store
+        with st.lock:
+            ids = [r["account_id"] for r in st.conn.execute("SELECT account_id FROM account_groups WHERE group_id=?", (group_id,))]
+            st.conn.execute("DELETE FROM account_groups WHERE group_id=?", (group_id,))
+            st.conn.execute("DELETE FROM groups WHERE id=?", (group_id,))
+            self._sync_primary(st.conn, ids)
+            st.conn.commit()
+
+    # ---------- 分組成員（一個郵箱可以同時在多個分組；accounts.group_id 保留為「第一個分組」兼容舊代碼） ----------
+    @staticmethod
+    def _gids(value):
+        """None / 單個 id / id 列表 → 去重後的 id 列表"""
+        if value in (None, "", 0):
+            return []
+        vals = value if isinstance(value, (list, tuple)) else [value]
+        out = []
+        for v in vals:
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+            if v and v not in out:
+                out.append(v)
+        return out
+
+    @staticmethod
+    def _sync_primary(conn, ids):
+        ids = [int(i) for i in ids or []]
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            conn.execute(
+                f"UPDATE accounts SET group_id=(SELECT group_id FROM account_groups ag WHERE ag.account_id=accounts.id "
+                f"ORDER BY rowid LIMIT 1) WHERE id IN ({','.join('?' for _ in chunk)})", chunk)
+
+    def _change_groups(self, ids, mode, group_ids):
+        """mode：set = 只在這些分組；add = 加入；remove = 移出。"""
+        ids = [int(i) for i in ids or []]
+        gids = self._gids(group_ids)
+        if not ids:
+            return
+        st = self._store
+        with st.lock:
+            marks = ",".join("?" for _ in ids)
+            if mode == "set":
+                st.conn.execute(f"DELETE FROM account_groups WHERE account_id IN ({marks})", ids)
+            if mode in ("set", "add"):
+                st.conn.executemany("INSERT OR IGNORE INTO account_groups(account_id, group_id) VALUES (?, ?)",
+                                    [(a, g) for a in ids for g in gids])
+            elif mode == "remove" and gids:
+                st.conn.execute(f"DELETE FROM account_groups WHERE account_id IN ({marks}) AND group_id IN "
+                                f"({','.join('?' for _ in gids)})", ids + gids)
+            st.conn.execute(f"UPDATE accounts SET updated_at=? WHERE id IN ({marks})", [int(time.time())] + ids)
+            self._sync_primary(st.conn, ids)
+            st.conn.commit()
+
+    @need_unlock
+    def set_groups(self, ids, group_ids):
+        self._change_groups(ids, "set", group_ids)
+
+    @need_unlock
+    def add_to_group(self, ids, group_id):
+        self._change_groups(ids, "add", group_id)
+
+    @need_unlock
+    def remove_from_group(self, ids, group_id):
+        self._change_groups(ids, "remove", group_id)
 
     # ---------- 賬號 ----------
     @need_unlock
     def list_accounts(self, sheet_id):
         rows = self._store.query("SELECT * FROM accounts WHERE sheet_id=? ORDER BY id DESC", (sheet_id,))
+        groups = {}
+        for m in self._store.query("SELECT ag.account_id, ag.group_id FROM account_groups ag JOIN accounts a ON a.id = ag.account_id "
+                                   "WHERE a.sheet_id=? ORDER BY ag.rowid", (sheet_id,)):
+            groups.setdefault(m["account_id"], []).append(m["group_id"])
         for r in rows:
             r["extra"] = json.loads(r["extra"] or "{}")
+            r["group_ids"] = groups.get(r["id"], [])
             self._decrypt_row(r)
         return rows
 
@@ -451,7 +532,8 @@ class Api:
         values["backup_codes"] = normalize_backup_codes(data.get("backup_codes"))
         self._encrypt_row(values)
         status = data.get("status") or "正常"
-        group_id = data.get("group_id") or None
+        gids = self._gids(data["group_ids"] if "group_ids" in data else data.get("group_id"))
+        group_id = gids[0] if gids else None
         extra = json.dumps(data.get("extra") or {}, ensure_ascii=False)
         if data.get("id"):
             self._selfmail_check_updates([(data["id"], {"email": data.get("email"), "password": data.get("password") or ""})])
@@ -461,25 +543,29 @@ class Api:
                 f"UPDATE accounts SET {sets}, status=?, group_id=?, extra=?, updated_at=? WHERE id=?",
                 [values[f] for f in FIELDS] + [status, group_id, extra, now, data["id"]],
             )
+            self._change_groups([data["id"]], "set", gids)
             return data["id"]
         cols = ", ".join(FIELDS)
         marks = ", ".join("?" for _ in FIELDS)
-        return self._store.execute(
+        new_id = self._store.execute(
             f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
             f"VALUES (?, {marks}, ?, ?, ?, ?, ?)",
             [data["sheet_id"]] + [values[f] for f in FIELDS] + [status, group_id, extra, now, now],
         )
+        self._change_groups([new_id], "set", gids)
+        return new_id
 
     @need_unlock
     def delete_accounts(self, ids):
         rows = self._selfmail_ids(ids)
         if rows:  # 自建郵箱：先在後台刪除，成功了再刪本地
             self._admin_client(self._admin_cfg()).delete_mailboxes([r["email"] for r in rows.values()])
+        self._bulk("DELETE FROM account_groups WHERE account_id IN ({})", ids)
         self._bulk("DELETE FROM accounts WHERE id IN ({})", ids)
 
     @need_unlock
     def set_group(self, ids, group_id):
-        self._bulk("UPDATE accounts SET group_id=? WHERE id IN ({})", ids, [group_id or None])
+        self._change_groups(ids, "set", group_id)
 
     @need_unlock
     def set_status(self, ids, status):
@@ -877,19 +963,20 @@ class Api:
         row = self._store.query("SELECT id FROM accounts WHERE sheet_id=? AND lower(email)=?", (sid, email.lower()))
         enc = self._cipher.encrypt(password)
         if row:
-            sets, args = ["password=?", "status=?"], [enc, status]
+            self._store.execute("UPDATE accounts SET password=?, status=?, updated_at=? WHERE id=?", (enc, status, now, row[0]["id"]))
             if group_id:
-                sets.append("group_id=?")
-                args.append(group_id)
-            self._store.execute(f"UPDATE accounts SET {', '.join(sets)}, updated_at=? WHERE id=?", args + [now, row[0]["id"]])
+                self._change_groups([row[0]["id"]], "add", group_id)
             return row[0]["id"]
         values = {f: "" for f in FIELDS}
         values.update(email=email, password=password)
         self._encrypt_row(values)
-        return self._store.execute(
+        new_id = self._store.execute(
             f"INSERT INTO accounts(sheet_id, {', '.join(FIELDS)}, status, group_id, extra, created_at, updated_at) "
             f"VALUES (?, {', '.join('?' for _ in FIELDS)}, ?, ?, '{{}}', ?, ?)",
             [sid] + [values[f] for f in FIELDS] + [status, group_id or None, now, now])
+        if group_id:
+            self._change_groups([new_id], "add", group_id)
+        return new_id
 
     def _selfmail_push(self, row, password=None, active=None):
         """把改動寫到 BillionMail 後台（改密碼 / 停用 / 啟用）。"""
@@ -1171,7 +1258,7 @@ class Api:
         if skip_dup:
             existing = {r["email"].lower() for r in self._store.query("SELECT email FROM accounts WHERE sheet_id=?", (sheet_id,))}
         now = int(time.time())
-        batch = []
+        batch, row_groups = [], []
         skipped = 0
         for r in rows or []:
             values = {f: str(r.get(f) or "").strip() for f in FIELDS}
@@ -1186,8 +1273,10 @@ class Api:
             values["backup_codes"] = normalize_backup_codes(r.get("backup_codes"))
             row_extra = {**common, **{k: v for k, v in (r.get("extra") or {}).items() if v}}
             self._encrypt_row(values)
+            row_gids = self._gids(self._gids(group_id) + self._gids(r.get("group_ids")))
+            row_groups.append(row_gids)
             batch.append([sheet_id] + [values[f] for f in FIELDS]
-                         + [status, group_id or None, json.dumps(row_extra, ensure_ascii=False), now, now])
+                         + [status, row_gids[0] if row_gids else None, json.dumps(row_extra, ensure_ascii=False), now, now])
         cols = ", ".join(FIELDS)
         marks = ", ".join("?" for _ in FIELDS)
         sql = (f"INSERT INTO accounts(sheet_id, {cols}, status, group_id, extra, created_at, updated_at) "
@@ -1195,8 +1284,11 @@ class Api:
         ids = []
         st = self._store
         with st.lock:  # 逐條插入以拿到新 id（AI 助手撤銷用），一次提交
-            for row in batch:
-                ids.append(st.conn.execute(sql, row).lastrowid)
+            for row, gids in zip(batch, row_groups):
+                new_id = st.conn.execute(sql, row).lastrowid
+                ids.append(new_id)
+                st.conn.executemany("INSERT OR IGNORE INTO account_groups(account_id, group_id) VALUES (?, ?)",
+                                    [(new_id, g) for g in gids])
             st.conn.commit()
         return {"added": len(batch), "skipped": skipped, "ids": ids}
 
@@ -1211,9 +1303,13 @@ class Api:
             for r in rows or []:
                 values = {f: str(r.get(f) or "") for f in FIELDS}
                 self._encrypt_row(values)
+                gids = self._gids(r["group_ids"] if "group_ids" in r else r.get("group_id"))
                 st.conn.execute(sql, [int(r["id"])] + [values[f] for f in FIELDS] + [
-                    int(r["sheet_id"]), r.get("status") or STATUSES[0], r.get("group_id") or None,
+                    int(r["sheet_id"]), r.get("status") or STATUSES[0], gids[0] if gids else None,
                     json.dumps(r.get("extra") or {}, ensure_ascii=False), int(r.get("created_at") or now), now])
+                st.conn.execute("DELETE FROM account_groups WHERE account_id=?", (int(r["id"]),))
+                st.conn.executemany("INSERT OR IGNORE INTO account_groups(account_id, group_id) VALUES (?, ?)",
+                                    [(int(r["id"]), g) for g in gids])
             st.conn.commit()
 
     @need_unlock

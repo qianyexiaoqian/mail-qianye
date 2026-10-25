@@ -288,6 +288,14 @@ tr:hover .cell-custom .placeholder { visibility: visible; }
 .bc-row.used .bc-code { text-decoration: line-through; color: var(--muted); }
 .bc-no { width: 18px; text-align: right; font-size: 11px; }
 .bc-code { font-size: 14px; letter-spacing: 1px; }
+.group-cell { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; min-height: 20px; min-width: 40px; }
+.group-cell .tag { flex: none; }
+.group-pick { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
+.group-chip { cursor: pointer; background: transparent; color: var(--text-2); border-color: var(--line-2); font: inherit; font-size: 12px; }
+.group-chip.on { font-weight: 600; }
+.group-pop { width: 240px; }
+.group-pop-item { display: flex; gap: 8px; padding: 5px 4px; border-radius: 5px; }
+.group-pop-item:hover { background: var(--row-hover); }
 .row-index { font-variant-numeric: tabular-nums; font-size: 12px; }
 .col-list { margin: 8px 0 10px; max-height: 52vh; overflow: auto; }
 .col-item { margin-bottom: 4px; }
