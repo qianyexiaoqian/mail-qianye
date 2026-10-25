@@ -278,6 +278,16 @@ tr:hover .cell-custom .placeholder { visibility: visible; }
 .ai-presets { flex-wrap: wrap; }
 .rec-type { width: 150px; flex: none; padding: 6px 4px !important; }
 .rec-hint { font-size: 11px; }
+.bc-cell { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bc-cell.warn { color: var(--warn); }
+.bc-add { cursor: pointer; }
+.bc-pop { width: 300px; }
+.bc-list { margin-top: 8px; max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; }
+.bc-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.bc-row:last-child { border-bottom: 0; }
+.bc-row.used .bc-code { text-decoration: line-through; color: var(--muted); }
+.bc-no { width: 18px; text-align: right; font-size: 11px; }
+.bc-code { font-size: 14px; letter-spacing: 1px; }
 .row-index { font-variant-numeric: tabular-nums; font-size: 12px; }
 .col-list { margin: 8px 0 10px; max-height: 52vh; overflow: auto; }
 .col-item { margin-bottom: 4px; }

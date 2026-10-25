@@ -10,9 +10,9 @@ const AGENT_HISTORY_LIMIT = 150000;  // 對話歷史超過這麼多字符就丟�
 const AGENT_UNDO_LIMIT = 30;
 const AGENT_MAX_IMAGES = 4;  // 每條消息最多附幾張圖
 const AGENT_IMAGE_MAX = 1280;  // 圖片縮到這個邊長再發送和保存
-const AGENT_TEXT_FIELDS = ['email', 'password', 'totp_secret', 'recovery_email', 'recovery_password',
+const AGENT_TEXT_FIELDS = ['email', 'password', 'totp_secret', 'backup_codes', 'recovery_email', 'recovery_password',
   'oauth_client_id', 'oauth_token', 'phone', 'notes'];
-const AGENT_SECRET_FIELDS = ['password', 'totp_secret', 'recovery_password', 'oauth_token'];
+const AGENT_SECRET_FIELDS = ['password', 'totp_secret', 'backup_codes', 'recovery_password', 'oauth_token'];
 // 顏色標記列可以用顏色名賦值
 const COLOR_NAMES = {
   red: '#e5484d', 紅: '#e5484d', 红: '#e5484d', orange: '#f76b15', 橙: '#f76b15', yellow: '#f5a524', 黃: '#f5a524', 黄: '#f5a524',
@@ -148,6 +148,9 @@ const AGENT_TOOLS = [
     offset: { type: 'integer', description: 'move：相對移動，-1 = 上移一位，2 = 下移兩位' },
   }, ['action']),
   agentFn('get_2fa_codes', '獲取郵箱當前的 2FA 驗證碼（6 位，30 秒有效）', { filter: AGENT_FILTER }),
+  agentFn('use_backup_code', '取這個郵箱下一個未用的一次性備用碼（例如 Google 的 10 個備用碼）：在本地複製到剪貼板並標記為已用，返回剩餘數量', {
+    email: AGENT_STR,
+  }, ['email']),
   agentFn('fetch_mail', '收取郵箱的最新郵件（自建 BillionMail / 微軟郵箱），返回發件人、標題、時間、提取到的驗證碼和正文摘要', {
     email: { type: 'string', description: '主郵箱地址（當前列表裡的）' },
     which: { type: 'string', enum: ['recovery', 'email'], description: 'recovery=它的輔助郵箱（默認），email=主郵箱本身' },
@@ -646,6 +649,17 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'manage_groups': return this.agentManageGroups(args);
         case 'manage_sheets': return this.agentManageSheets(args);
         case 'get_2fa_codes': return this.agent2fa(args);
+        case 'use_backup_code': {
+          const a = this.accounts.find(x => x.email.toLowerCase() === String(args.email || '').trim().toLowerCase());
+          if (!a) return { error: `no account "${args.email}" in the current sheet` };
+          const i = this.backupList(a).findIndex(x => !x.used);
+          if (i < 0) return { error: 'no unused backup codes left', total: this.backupList(a).length };
+          const code = this.backupList(a)[i].code;
+          await this.copyBackup(a, i, true);
+          const out = { copied: true, number: i + 1, left: this.backupLeft(a), total: this.backupList(a).length };
+          if (this.prefs.agentSecrets) out.code = code;
+          return out;
+        }
         case 'fetch_mail': return this.agentFetchMail(args);
         case 'copy_to_clipboard': return this.agentCopy(args);
         case 'export_accounts': {
@@ -889,6 +903,10 @@ ${learned ? '\n' + learned + '\n' : ''}
       for (const f of AGENT_SECRET_FIELDS) {
         if (secrets && (all || want(f))) out[f] = a[f] || '';
         else if (want(f) || want('has_' + f)) out['has_' + f] = !!a[f];
+      }
+      if (a.backup_codes && (all || want('backup_codes') || want('backup_codes_left'))) {
+        out.backup_codes_left = this.backupLeft(a);
+        out.backup_codes_total = this.backupList(a).length;
       }
       if (want('updated_at')) out.updated_at = this.fmtDate(a.updated_at);
       if (want('created_at')) out.created_at = this.fmtDate(a.created_at);

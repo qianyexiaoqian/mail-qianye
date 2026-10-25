@@ -45,6 +45,7 @@ function isTotpSecret(p) {
 function classifyPart(p) {
   if (!p) return 'empty';
   if (EMAIL_RE.test(p)) return 'email';
+  if ((p.match(/(?<!\d)\d{4}[ -]?\d{4}(?!\d)/g) || []).length >= 2) return 'backup';  // 多個 8 位碼 = 備用碼
   if (isTotpSecret(p)) return 'totp';
   if (UUID_RE.test(p)) return 'client_id';
   if (p.length >= 80 && !/\s/.test(p)) return 'token';
@@ -53,7 +54,7 @@ function classifyPart(p) {
   return 'text';
 }
 
-const SMART_KIND_FIELD = { totp: 'totp_secret', client_id: 'oauth_client_id', token: 'oauth_token', phone: 'phone', country: 'country' };
+const SMART_KIND_FIELD = { backup: 'backup_codes', totp: 'totp_secret', client_id: 'oauth_client_id', token: 'oauth_token', phone: 'phone', country: 'country' };
 
 /* 智能識別：不管順序，按內容判斷每一段是什麼。
    第一個郵箱 = 郵箱，第二個 = 輔助郵箱；緊跟郵箱的一段 = 密碼，緊跟輔助郵箱的普通文本 = 輔助郵箱密碼。
@@ -64,7 +65,7 @@ function smartAssign(parts) {
   for (const p of parts) {
     const kind = classifyPart(p);
     if (kind === 'empty') { prev = ''; continue; }
-    const distinct = kind === 'totp' || kind === 'client_id' || kind === 'token';
+    const distinct = kind === 'totp' || kind === 'client_id' || kind === 'token' || kind === 'backup';
     let field = '';
     if (kind === 'email') field = !row.email ? 'email' : 'recovery_email';
     else if (prev === 'email' && !distinct) field = 'password';
@@ -132,7 +133,7 @@ function parseAiLines(text) {
 // AI 返回的一行 → 導入用的行
 function aiRowToImport(obj) {
   const row = {};
-  for (const f of ['email', 'password', 'totp_secret', 'recovery_email', 'recovery_password', 'oauth_client_id', 'oauth_token', 'phone', 'notes']) {
+  for (const f of ['email', 'password', 'totp_secret', 'backup_codes', 'recovery_email', 'recovery_password', 'oauth_client_id', 'oauth_token', 'phone', 'notes']) {
     const v = obj[f] == null ? '' : String(obj[f]).trim();
     if (v) row[f] = v;
   }

@@ -12,13 +12,14 @@ DEFAULT_PROMPT = """你是郵箱賬號數據整理助手。用戶會給你若干
 分隔符可能是 ---- / | , ; : 空格 Tab 等任意符號，也可能缺少分隔符、有多餘空格、全角符號或錯別字。
 
 請逐行識別並修正，每個輸入行輸出一個 JSON 對象，一行一個（JSON Lines）。不要輸出任何解釋，不要使用 Markdown 代碼塊。對象格式：
-{"line": 行號, "email": "", "password": "", "recovery_email": "", "recovery_password": "", "totp_secret": "", "phone": "", "country": "", "oauth_client_id": "", "oauth_token": "", "notes": "", "ok": true, "reason": ""}
+{"line": 行號, "email": "", "password": "", "recovery_email": "", "recovery_password": "", "totp_secret": "", "backup_codes": "", "phone": "", "country": "", "oauth_client_id": "", "oauth_token": "", "notes": "", "ok": true, "reason": ""}
 
 規則：
 1. email（主郵箱）必填；同一行裡第二個郵箱地址通常是輔助郵箱 recovery_email。
 2. 只修正郵箱地址裡明顯的錯誤：全角＠和全角點、多餘空格、常見域名拼寫錯誤（gmial.com→gmail.com、outlok.com→outlook.com、hotmial.com→hotmail.com）、缺少 .com 等。不要臆造原文裡沒有的內容。
 3. 密碼、輔助郵箱密碼、令牌必須與原文逐字一致，不要修改、補全或「糾正」。
 4. totp_secret 是 16 位以上的 Base32 字符串（A-Z、2-7），去掉空格後輸出大寫；otpauth:// 鏈接原樣輸出。
+   backup_codes 是一次性備用碼（例如 Google 的 10 個 8 位數字「1234 5678」），多個用換行分隔，原樣保留。
 5. country 輸出 ISO 3166-1 二位大寫代碼（us→US，uk→GB，日本→JP），無法確定就留空。
 6. 無法歸類的內容放進 notes。
 7. 實在找不到郵箱的行，輸出 "ok": false，並在 reason 裡用簡短中文說明原因。

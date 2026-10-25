@@ -109,14 +109,14 @@ function fileToThumb(file, max = 128) {
 }
 
 const BASE_COLUMNS = [
-  { key: 'index' }, { key: 'email', sort: true }, { key: 'password' }, { key: 'totp' }, { key: 'recovery_email', sort: true },
+  { key: 'index' }, { key: 'email', sort: true }, { key: 'password' }, { key: 'totp' }, { key: 'backup_codes' }, { key: 'recovery_email', sort: true },
   { key: 'recovery_password' }, { key: 'phone', sort: true }, { key: 'group', sort: true }, { key: 'status', sort: true },
   { key: 'notes', sort: true }, { key: 'updated', sort: true },
 ];
-const DEFAULT_VISIBLE = { index: true, email: true, password: true, totp: true, recovery_email: true, recovery_password: false,
+const DEFAULT_VISIBLE = { index: true, email: true, password: true, totp: true, backup_codes: true, recovery_email: true, recovery_password: false,
   phone: false, group: true, status: true, notes: true, updated: false };
 // 默認列寬（px），拖動表頭右邊緣可調整，記在 prefs.colWidths
-const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, recovery_email: 230, recovery_password: 140, phone: 140,
+const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, backup_codes: 96, recovery_email: 230, recovery_password: 140, phone: 140,
   group: 100, status: 80, notes: 240, updated: 140 };
 const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, image: 70 };
 const MIN_COL_WIDTH = 50;
@@ -908,6 +908,53 @@ const app = createApp({
     },
 
     // ---------- 自定義列：點擊單元格 ----------
+    // ---------- 備用碼（一次性驗證碼，一行一個，已用的前面有「~」） ----------
+    backupList(a) {
+      return String(a?.backup_codes || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)
+        .map(line => ({ used: line.startsWith('~'), code: line.replace(/^~\s*/, '') }));
+    },
+    backupLeft(a) { return this.backupList(a).filter(x => !x.used).length; },
+    openBackupPop(a, e) {
+      if (!a.backup_codes) return this.openEdit(a, 'backup_codes');
+      const r = e.currentTarget.getBoundingClientRect();
+      const w = 300, h = 360;
+      const x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+      const y = r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+      this.pop = { kind: 'backup', account: a, x, y };
+    },
+    async saveBackup(a, list) {
+      const text = list.map(x => (x.used ? '~' : '') + x.code).join('\n');
+      try {
+        await call('update_fields', [{ id: a.id, fields: { backup_codes: text } }]);
+        a.backup_codes = text;
+      } catch (e) { this.toast(errText(e), 'error'); }
+    },
+    async toggleBackupUsed(a, i) {
+      const list = this.backupList(a);
+      list[i].used = !list[i].used;
+      await this.saveBackup(a, list);
+    },
+    // 複製一個碼；markUsed = 同時標記為已用
+    async copyBackup(a, i, markUsed) {
+      const list = this.backupList(a);
+      await this.copy(list[i].code, t('bc.code'));
+      if (markUsed && !list[i].used) { list[i].used = true; await this.saveBackup(a, list); }
+    },
+    async copyNextBackup(a) {
+      const i = this.backupList(a).findIndex(x => !x.used);
+      if (i < 0) return this.toast(t('bc.noneLeft'), 'error');
+      await this.copyBackup(a, i, true);
+    },
+    // 編輯窗口裡粘貼原始文字時的預覽：識別到幾個碼（規則和後台 normalize_backup_codes 一致）
+    backupPreview(text) {
+      const s = String(text || '');
+      if (!s.trim()) return '';
+      const google = s.match(/(?<!\d)\d{4}[ -]?\d{4}(?!\d)/g);
+      const n = google ? new Set(google.map(x => x.replace(/\D/g, ''))).size
+        : s.split(/[\r\n,;，；|]+/).map(x => x.trim()).filter(Boolean).length;
+      return t('bc.recognized', { n });
+    },
+
     onCustomCell(a, col, e) {
       if (col.type === 'text') return this.copy(a.extra[col.id]);
       const r = e.currentTarget.getBoundingClientRect();
@@ -942,7 +989,7 @@ const app = createApp({
       this.edit = a
         ? { ...a, extra: { ...a.extra } }
         : { sheet_id: this.sheetId, email: '', password: '', totp_secret: '', recovery_email: '', recovery_password: '',
-            oauth_client_id: '', oauth_token: '', phone: '', notes: '',
+            oauth_client_id: '', oauth_token: '', phone: '', notes: '', backup_codes: '',
             status: this.meta.statuses[0], group_id: typeof this.filters.group === 'number' ? this.filters.group : null, extra: {} };
       this.refreshEditCode(this.edit.totp_secret);
       nextTick(() => this.focusEditField(focus));

@@ -215,6 +215,11 @@
                 <span v-if="a[c.key]" class="copy mono" @click="copy(a[c.key], t('copy.password'), true)">{{ showPwd || revealed[a.id] ? a[c.key] : '••••••••' }}</span>
                 <button v-if="a[c.key] && !showPwd" class="icon-btn sm eye" @click="revealed[a.id] = !revealed[a.id]">{{ revealed[a.id] ? '◉' : '◎' }}</button>
               </template>
+              <template v-else-if="c.key === 'backup_codes'">
+                <span v-if="a.backup_codes" class="copy bc-cell" :class="{warn: backupLeft(a) <= 2}" :title="t('bc.cellTip')"
+                      @click="openBackupPop(a, $event)">🔑 {{ backupLeft(a) }}/{{ backupList(a).length }}</span>
+                <span v-else class="muted add-note bc-add" @click="openEdit(a, 'backup_codes')">{{ t('bc.add') }}</span>
+              </template>
               <template v-else-if="c.key === 'totp'">
                 <span v-if="a.totp_secret" class="code copy" :class="{warn: remaining <= 5}" @click="copy(codes[a.totp_secret], t('copy.code'))"
                       :title="t('row.secret', {s: a.totp_secret})">{{ fmtCode(codes[a.totp_secret]) }}</span>
@@ -377,7 +382,26 @@
   </aside>
 
   <!-- ========== 單元格浮層編輯 ========== -->
-  <div v-if="pop" ref="popEl" class="popover" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+  <div v-if="pop && pop.kind === 'backup'" ref="popEl" class="popover bc-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+    <div class="popover-title">{{ t('col.backup_codes') }} · {{ pop.account.email }}</div>
+    <div class="editor-row">
+      <b>{{ t('bc.left', {n: backupLeft(pop.account), total: backupList(pop.account).length}) }}</b>
+      <span class="spacer"></span>
+      <button class="btn sm primary" :disabled="!backupLeft(pop.account)" @click="copyNextBackup(pop.account)">{{ t('bc.copyNext') }}</button>
+    </div>
+    <div class="bc-list">
+      <div v-for="(b, i) in backupList(pop.account)" :key="i" class="bc-row" :class="{used: b.used}">
+        <span class="muted bc-no">{{ i + 1 }}</span>
+        <span class="mono bc-code copy" :title="t('bc.copyTip')" @click="copyBackup(pop.account, i, false)">{{ b.code }}</span>
+        <span class="spacer"></span>
+        <button class="btn sm" @click="toggleBackupUsed(pop.account, i)">{{ b.used ? t('bc.markUnused') : t('bc.markUsed') }}</button>
+      </div>
+    </div>
+    <div class="editor-row" style="margin-top:6px">
+      <button class="link" @click="openEdit(pop.account, 'backup_codes')">{{ t('bc.edit') }}</button>
+    </div>
+  </div>
+  <div v-else-if="pop" ref="popEl" class="popover" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
     <div class="popover-title">{{ pop.col.name }} · {{ pop.account.email }}</div>
     <cell-editor :col="pop.col" :model-value="pop.account.extra[pop.col.id] || ''" @update:model-value="onPopInput" @pick="pop = null" :autofocus="true"></cell-editor>
   </div>
@@ -490,6 +514,11 @@
         <div v-for="col in currentSheet.columns" :key="col.id" class="field" :class="{full: col.type !== 'text'}" :data-field="'x_' + col.id">{{ col.name }}
           <cell-editor :col="col" v-model="edit.extra[col.id]"></cell-editor>
         </div>
+        <label class="full">
+          <span class="editor-row">{{ t('col.backup_codes') }} <span class="muted">{{ t('bc.hint') }}</span><span class="spacer"></span>
+            <span class="ok-text">{{ backupPreview(edit.backup_codes) }}</span></span>
+          <textarea v-model="edit.backup_codes" data-field="backup_codes" rows="3" class="mono" :placeholder="t('bc.placeholder')"></textarea>
+        </label>
         <label class="full">{{ t('col.notes') }}<textarea v-model="edit.notes" ref="editNotes" data-field="notes" rows="4" :placeholder="t('edit.notesPlaceholder')"></textarea></label>
       </div>
       <div class="modal-foot">

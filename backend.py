@@ -30,9 +30,10 @@ import mailfetch
 import vault
 
 STATUSES = ["正常", "待驗證", "異常", "封禁", "停用"]
-FIELDS = ["email", "password", "totp_secret", "recovery_email", "recovery_password",
+FIELDS = ["email", "password", "totp_secret", "backup_codes", "recovery_email", "recovery_password",
           "oauth_client_id", "oauth_token", "phone", "notes"]
-SECRET_FIELDS = ("password", "totp_secret", "recovery_password", "oauth_token")  # 加密存儲的字段
+SECRET_FIELDS = ("password", "totp_secret", "backup_codes", "recovery_password", "oauth_token")  # 加密存儲的字段
+# backup_codes：一次性備用碼（例如 Google 的 10 個），一行一個，已用過的前面加「~」
 # 微軟 OAuth2（帶令牌）的輔助郵箱：oauth_client_id = 應用 ClientID，oauth_token = refresh token
 
 
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     recovery_password TEXT NOT NULL DEFAULT '',
     oauth_client_id TEXT NOT NULL DEFAULT '',
     oauth_token TEXT NOT NULL DEFAULT '',
+    backup_codes TEXT NOT NULL DEFAULT '',
     phone TEXT NOT NULL DEFAULT '',
     group_id INTEGER,
     status TEXT NOT NULL DEFAULT '正常',
@@ -94,6 +96,45 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 """
+
+
+# 可選的編號「1.」+ 可選的已用標記「~」+ 8 位數字（中間可有空格或橫線）
+BACKUP_CODE_RE = re.compile(r"(?:(?<!\d)(\d{1,2})[.)、]\s*)?(~?)(?<!\d)(\d{4})[ -]?(\d{4})(?!\d)")
+
+
+def normalize_backup_codes(text):
+    """把粘貼進來的備用碼整理成「一行一個」：Google 的 8 位數字碼（1234 5678）直接從整段文字裡提取，
+    其他服務的碼按換行 / 逗號 / 空格拆開（去掉 1. 2. 這樣的編號）。已用的「~」標記保留，重複的去掉。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    found = BACKUP_CODE_RE.findall(text)
+    if found:
+        if all(num for num, *_ in found):  # Google 文件是兩欄排版，按編號 1-10 排序
+            found = sorted(found, key=lambda x: int(x[0]))
+        items = [(u == "~", f"{a} {b}") for _, u, a, b in found]
+    else:
+        items = []
+        for part in re.split(r"[\r\n,;，；|]+", text):
+            part = part.strip()
+            used = part.startswith("~")
+            part = re.sub(r"^~?\s*\d{1,2}[.)、:]\s+", "", part.lstrip("~")).strip()
+            tokens = part.split()
+            # 一行裡多個碼（空格分開）就拆開；否則整行是一個碼
+            if len(tokens) > 1 and all(len(t) >= 6 and any(c.isdigit() for c in t) for t in tokens):
+                items.extend((used, t) for t in tokens)
+            elif part:
+                items.append((used, part))
+    out, seen = [], {}
+    for used, code in items:
+        key = code.replace(" ", "").lower()
+        if key in seen:
+            if used:  # 任何一處標了已用就算已用
+                out[seen[key]] = "~" + out[seen[key]].lstrip("~")
+            continue
+        seen[key] = len(out)
+        out.append(("~" if used else "") + code)
+    return "\n".join(out)
 
 
 def clean_secret(secret):
@@ -129,7 +170,7 @@ class Store:
     def _migrate(self):
         """為舊版數據庫補上新增的列。"""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(accounts)")}
-        for col in ("oauth_client_id", "oauth_token"):
+        for col in ("oauth_client_id", "oauth_token", "backup_codes"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         # 列表類型：'' = 普通列表，'selfmail' = 自建郵箱管理窗口用的列表（和 BillionMail 後台同步）
@@ -407,6 +448,7 @@ class Api:
         values = {f: (data.get(f) or "").strip() for f in FIELDS}
         values["notes"] = (data.get("notes") or "").rstrip()
         values["totp_secret"] = clean_secret(values["totp_secret"])
+        values["backup_codes"] = normalize_backup_codes(data.get("backup_codes"))
         self._encrypt_row(values)
         status = data.get("status") or "正常"
         group_id = data.get("group_id") or None
@@ -461,6 +503,8 @@ class Api:
                     continue
                 if "totp_secret" in fields:
                     fields["totp_secret"] = clean_secret(fields["totp_secret"])
+                if "backup_codes" in fields:
+                    fields["backup_codes"] = normalize_backup_codes(fields["backup_codes"])
                 for k in fields:
                     if k in SECRET_FIELDS:
                         fields[k] = self._cipher.encrypt(fields[k])
@@ -1139,6 +1183,7 @@ class Api:
                 continue
             existing.add(key)
             values["totp_secret"] = clean_secret(values["totp_secret"])
+            values["backup_codes"] = normalize_backup_codes(r.get("backup_codes"))
             row_extra = {**common, **{k: v for k, v in (r.get("extra") or {}).items() if v}}
             self._encrypt_row(values)
             batch.append([sheet_id] + [values[f] for f in FIELDS]
