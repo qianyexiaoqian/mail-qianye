@@ -1102,6 +1102,8 @@
         <div class="full muted mail-hint">{{ t('agentcfg.contextHint') }}</div>
         <label class="full check"><input type="checkbox" v-model="settings.ai.agent_learn"> {{ t('agentcfg.learn') }}</label>
         <label class="full check"><input type="checkbox" v-model="settings.ai.agent_reflect" :disabled="!settings.ai.agent_learn"> {{ t('agentcfg.reflect') }}</label>
+        <label class="full check"><input type="checkbox" v-model="settings.ai.agent_computer"> {{ t('agentcfg.computer') }}</label>
+        <div class="full muted mail-hint">{{ t('agentcfg.computerHint') }}</div>
         <div class="full"><button class="btn sm" @click="openKb()">🧠 {{ t('kb.manage') }}</button></div>
       </div>
 

@@ -30,6 +30,7 @@ const AGENT_FILTER = {
     rows: { type: 'object', description: '表格「序號」範圍（按當前顯示順序，含首尾）', properties: { from: { type: 'integer' }, to: { type: 'integer' } } },
     emails: { type: 'array', items: { type: 'string' }, description: '主郵箱地址列表（不分大小寫）' },
     ids: { type: 'array', items: { type: 'integer' } },
+    scan_id: { type: 'string', description: 'fs_scan_accounts 返回的 scan_id：只選這次從文件裡統計到的郵箱' },
     search: { type: 'string', description: '和搜索框一樣的關鍵詞搜索（郵箱/輔助郵箱/備註/手機/自定義列，忽略 . _ - 符號；多個郵箱用空格分隔 = 任一匹配）' },
     conditions: {
       type: 'array',
@@ -120,10 +121,11 @@ const AGENT_TOOLS = [
     group: { type: 'string', description: '默認分組（不存在自動創建）' }, status: { type: 'string', description: '默認狀態' },
     sheet: { type: 'string' }, skip_duplicates: { type: 'boolean', description: '跳過列表裡已有的郵箱，默認 true' },
   }, ['accounts']),
-  agentFn('import_text', '用軟件的智能識別解析用戶粘貼的原始賬號文本（任意分隔符、任意順序）並導入。返回無法識別的行，你可以整理後用 add_accounts 補上', {
-    text: { type: 'string' }, group: AGENT_STR, status: AGENT_STR, sheet: AGENT_STR, columns: AGENT_COLUMNS,
+  agentFn('import_text', '用軟件的智能識別解析原始賬號文本（任意分隔符、任意順序）並導入：text 是用戶粘貼的文本，或者 scan_id = fs_scan_accounts 從文件裡統計到的賬號（用文件裡的原始行導入，已在列表裡的自動跳過）。返回無法識別的行，你可以整理後用 add_accounts 補上', {
+    text: { type: 'string' }, scan_id: { type: 'string', description: '導入 fs_scan_accounts 掃描到的賬號（代替 text）' },
+    group: AGENT_STR, status: AGENT_STR, sheet: AGENT_STR, columns: AGENT_COLUMNS,
     skip_duplicates: { type: 'boolean' },
-  }, ['text']),
+  }),
   agentFn('update_accounts', '修改郵箱：set / columns 是整個覆蓋字段的值；edits 是只改其中一部分文字（替換、刪掉某些字、加前後綴）。對 filter 選中的統一修改，或用 items 給每個郵箱分別修改', {
     filter: AGENT_FILTER, set: AGENT_SET, columns: AGENT_COLUMNS, edits: AGENT_EDITS,
     items: { type: 'array', description: '分別修改', items: { type: 'object', properties: { email: AGENT_STR, set: AGENT_SET, columns: AGENT_COLUMNS, edits: AGENT_EDITS }, required: ['email'] } },
@@ -175,7 +177,10 @@ const AGENT_TOOLS = [
     filter: AGENT_FILTER, fields: { type: 'array', items: { type: 'string' }, description: '默認 email,password,totp_secret,recovery_email' },
     separator: { type: 'string', description: '默認 ----' },
   }),
-  agentFn('export_accounts', '在本地導出文件（CSV 或 TXT，包含密碼），會彈出保存對話框', { filter: AGENT_FILTER, format: { type: 'string', enum: ['csv', 'txt'] } }),
+  agentFn('export_accounts', '在本地導出文件（CSV 或 TXT，包含密碼）。給 path 時直接保存到這個路徑（文件夾或完整文件名），否則彈出保存對話框', {
+    filter: AGENT_FILTER, format: { type: 'string', enum: ['csv', 'txt'] },
+    path: { type: 'string', description: '保存位置，例如 D:\\導出\\yutoux.txt 或一個文件夾' }, overwrite: { type: 'boolean' },
+  }),
   agentFn('create_recovery_mailboxes', '用 BillionMail 管理員權限，給郵箱在自建域名下創建同名輔助郵箱（隨機密碼）並保存；已有輔助郵箱的默認跳過', {
     filter: AGENT_FILTER, domain: AGENT_STR, overwrite: { type: 'boolean' },
   }, ['domain']),
@@ -199,6 +204,37 @@ const AGENT_SELFMAIL_TOOLS = [
     group: { type: 'string', description: '加入的分組，不存在自動創建' },
   }),
   agentFn('sync_mailboxes', '從 BillionMail 後台同步：後台新增的郵箱加進列表，後台刪掉的從列表移除，密碼和停用狀態更新'),
+];
+// 操作電腦：文件和命令（設置裡可關閉）。讀取 / 搜索文件內容、寫入、移動會先讓用戶確認（自動執行模式下讀寫不確認），執行命令總是確認
+const AGENT_PATH = { type: 'string', description: '路徑，例如 E:\\workspace\\號池。用戶給的路徑原樣傳入（少了冒號、正反斜槓都可以），不存在時返回相近的名字' };
+const AGENT_COMPUTER_TOOLS = [
+  agentFn('fs_list', '列出電腦上某個文件夾的內容（名稱、類型、大小、修改時間）', {
+    path: AGENT_PATH, pattern: { type: 'string', description: '文件名過濾，例如 *.txt；多個用分號' },
+    recursive: { type: 'boolean', description: '包括子文件夾' }, limit: { type: 'integer', description: '默認 200，最多 500' },
+  }, ['path']),
+  agentFn('fs_scan_accounts', '統計文件或文件夾（含子文件夾）裡的郵箱賬號：每行第一個郵箱算一個賬號，去重，並對比哪些已在當前列表 / 其他列表 / 還沒導入。' +
+    '返回 scan_id，之後 update_accounts / select_rows / set_view 的 filter.scan_id、import_text.scan_id 可以直接用它，不用把郵箱抄一遍。支持 txt/csv/json/xlsx/docx 等', {
+    path: AGENT_PATH, pattern: { type: 'string', description: '只看這些文件，例如 *.txt;*.csv（默認所有文本、表格文件）' },
+    recursive: { type: 'boolean', description: '默認 true' },
+  }, ['path']),
+  agentFn('fs_read', '讀取文本文件的內容（自動識別編碼，xlsx/docx 轉成文本），按行分段返回。賬號文件裡有密碼，統計郵箱請用 fs_scan_accounts', {
+    path: AGENT_PATH, offset: { type: 'integer', description: '從第幾行開始，默認 1' }, limit: { type: 'integer', description: '最多多少行，默認 200' },
+  }, ['path']),
+  agentFn('fs_search', '在文件或文件夾裡搜索包含某段文字的行（返回文件、行號、內容）', {
+    path: AGENT_PATH, query: AGENT_STR, regex: { type: 'boolean' }, pattern: { type: 'string', description: '只搜這些文件，例如 *.txt' },
+    recursive: { type: 'boolean', description: '默認 true' },
+  }, ['path', 'query']),
+  agentFn('fs_write', '寫入文本文件（UTF-8）。文件已存在時需要 append=true（追加到末尾）或 overwrite=true（覆蓋）', {
+    path: AGENT_PATH, content: AGENT_STR, append: { type: 'boolean' }, overwrite: { type: 'boolean' },
+  }, ['path', 'content']),
+  agentFn('fs_move', '移動 / 重命名 / 複製文件或文件夾。to 是文件夾時放進去', {
+    from: AGENT_PATH, to: AGENT_PATH, copy: { type: 'boolean', description: 'true = 複製，保留原文件' },
+  }, ['from', 'to']),
+  agentFn('fs_mkdir', '新建文件夾（含上級）', { path: AGENT_PATH }, ['path']),
+  agentFn('fs_open', '在資源管理器裡打開文件夾，或打開文件所在位置並選中它', { path: AGENT_PATH }, ['path']),
+  agentFn('run_command', '在用戶電腦上執行一條 PowerShell 命令並返回輸出（每次都需要用戶確認）。只在文件工具做不到時使用，不要執行刪除、格式化、改系統設置等危險操作', {
+    command: AGENT_STR, cwd: { type: 'string', description: '工作目錄，默認用戶主目錄' }, timeout: { type: 'integer', description: '秒，默認 60，最多 600' },
+  }, ['command']),
 ];
 // 技能和經驗：read_skill 總是可用；記經驗 / 寫技能在設置裡開了「允許 AI 自動學習」才有
 const AGENT_SKILL_TOOLS = [
@@ -224,6 +260,9 @@ function agentConfirmLevel(name, args) {
   if (name === 'delete_accounts') return 'danger';
   if (['manage_sheets', 'manage_columns', 'manage_groups', 'manage_families'].includes(name) && args.action === 'delete') return 'danger';
   if (name === 'manage_families' && args.action !== 'list') return 'write';
+  if (name === 'run_command') return 'danger';
+  if (['fs_read', 'fs_search', 'fs_write', 'fs_move', 'fs_mkdir'].includes(name)) return 'write';
+  if (name === 'export_accounts' && args.path) return 'write';
   if (['update_accounts', 'add_accounts', 'import_text', 'move_to_sheet', 'create_recovery_mailboxes', 'create_mailboxes'].includes(name)) return 'write';
   return '';
 }
@@ -234,7 +273,7 @@ const AgentMixin = {
       // 多對話：chatId = 當前對話（null = 還沒保存的新對話），chats = 對話列表，images = 待發送的圖片
       chatId: null, title: '', chats: [], showList: false, images: [], viewer: '', token: 0, trimmed: 0, skillMenu: false },
       // 助手設置（設置 → AI 糾錯裡改）和技能 / 經驗庫
-      agentCfg: { agent_max_turns: 20, agent_max_chars: 150000, agent_learn: true, agent_reflect: true },
+      agentCfg: { agent_max_turns: 20, agent_max_chars: 150000, agent_learn: true, agent_reflect: true, agent_computer: true },
       kb: { skills: [], memories: [], reflected: {} }, kbEdit: null };
   },
 
@@ -242,7 +281,7 @@ const AgentMixin = {
     agentExamples() { return (SELFMAIL ? [1, 2, 3, 4] : [1, 2, 3, 4, 5]).map(i => t((SELFMAIL ? 'agent.sm' : 'agent.ex') + i)); },
     agentTools() {
       const base = SELFMAIL ? [...AGENT_TOOLS.filter(x => !AGENT_MAIN_ONLY.includes(x.function.name)), ...AGENT_SELFMAIL_TOOLS] : AGENT_TOOLS;
-      return [...base, ...AGENT_SKILL_TOOLS, ...(this.agentCfg.agent_learn ? AGENT_LEARN_TOOLS : [])];
+      return [...base, ...(this.agentCfg.agent_computer ? AGENT_COMPUTER_TOOLS : []), ...AGENT_SKILL_TOOLS, ...(this.agentCfg.agent_learn ? AGENT_LEARN_TOOLS : [])];
     },
     // 技能：當前窗口可用的（停用的不算）
     agentSkills() { return this.kb.skills.filter(s => s.mode !== 'off' && (!s.scope || s.scope === 'all' || s.scope === (MODE || 'main'))); },
@@ -266,6 +305,7 @@ const AgentMixin = {
     // 解鎖後調用：載入對話列表，恢復上次的對話和面板狀態
     async agentInit() {
       await this.agentLoadCfg();
+      call('fs_info').then(r => { this.fsInfo = r; }).catch(() => {});
       await this.agentLoadKb();
       try {
         this.agent.chats = await call('list_chats', MODE);
@@ -527,6 +567,13 @@ const AgentMixin = {
       const n = out.total ?? out.updated ?? out.added ?? out.deleted ?? out.moved ?? out.copied ?? out.exported ?? out.selected;
       switch (name) {
         case 'set_view': return t('agent.sum.view', { n: out.visible });
+        case 'fs_list': return out.error ? out.error : t('agent.sum.fsList', { n: out.total });
+        case 'fs_scan_accounts': return out.error ? out.error : t('agent.sum.fsScan', { n: out.unique_emails, f: out.files_with_accounts, a: out.in_current_sheet, b: out.not_in_sheet });
+        case 'fs_read': return out.error ? out.error : `${out.from}-${out.to} / ${out.total_lines}`;
+        case 'fs_search': return out.error ? out.error : t('agent.sum.found', { n: out.matches });
+        case 'fs_write': case 'fs_mkdir': case 'fs_open': return out.error ? out.error : (out.path || out.opened || '✓');
+        case 'fs_move': return out.error ? out.error : out.to;
+        case 'run_command': return out.error ? out.error : `exit ${out.exit_code} · ${out.seconds}s`;
         case 'manage_families': return out.families ? t('agent.sum.families', { n: out.families.length })
           : (out.family ? `${out.family}${out.members != null ? ' · ' + out.members : ''}` : '✓');
         case 'select_rows': return t('agent.sum.selected', { n: out.selected });
@@ -573,6 +620,7 @@ const AgentMixin = {
           shown: this.sorted.length, page: this.page, page_size: this.pageSize,
         },
         selected: this.accounts.filter(a => this.selected[a.id]).length,
+        computer: this.agentCfg.agent_computer ? this.fsInfo || undefined : undefined,
         top_domains: this.domains.slice(0, 15),
         self_hosted_domains: this.selfDomains,
         billionmail_configured: !!this.mailCfg?.panel_url,
@@ -596,7 +644,7 @@ const AgentMixin = {
         ? `- 自動學習：用戶糾正你、說明偏好或某個詞的意思時，用 remember 記下（一句話，不記具體郵箱、密碼）；用戶教了一種做法、或你完成了一個以後可能重複的多步任務時，用 save_skill 寫成技能。不要重複記已有的內容。\n`
         : '';
       return `你是「郵箱管理」桌面軟件內置的 AI 助手（agent）。你能通過工具完成這個軟件裡幾乎所有的操作：用戶讓你做什麼，就直接調用工具去做完，而不是教用戶自己去點界面。
-能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表、家庭組（組長 + 成員的關係）；查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
+能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表、家庭組（組長 + 成員的關係）；${this.agentCfg.agent_computer ? '操作電腦：瀏覽 / 讀取 / 搜索 / 寫入 / 移動文件、從文件裡統計和導入郵箱、執行命令；' : ''}查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
 工作方式：
 - 你擁有上面列出的全部工具。不要說「我沒有這個功能」「需要你在軟件裡手動操作」，也不要提「改名繞過」之類的變通辦法，先看工具能不能直接完成；只有工具確實做不到時才這樣說。
 - 先根據「當前狀態」裡的 groups（側邊欄分組，按顯示順序）、sheets（列表）、columns（表格列）判斷用戶說的名字指的是什麼：
@@ -605,7 +653,10 @@ const AgentMixin = {
   · 「把郵箱放進 / 加到 29 分組」是改郵箱的分組，不是調整分組順序。
 - 一個郵箱可以同時在多個分組：「加入 / 也放進 X 分組」用 set.add_groups（保留原有分組）；「從 X 分組移出」用 set.remove_groups；「只放在 X / 改成 X 分組」才用 set.group 或 set.groups（替換全部）；「移出所有分組」用 set.group=""。篩選「在 X 分組裡的」用 conditions {field:"group", op:"eq", value:"X"}。
   · 名字同時能對上兩種、又看不出指哪個時，簡短地問一句再做。
-- 家庭組 ≠ 分組：分組只是標籤；家庭組是郵箱之間的關係（一個組長 + 成員，例如 Google 家庭組 / YouTube 家庭方案），用 manage_families。「把 A 設為組長，B、C 加進去」→ manage_families create（或 set_owner + add_members）；「看 X 家庭組 / 誰是組長」→ manage_families list 或 set_view({family})；篩選家庭組成員用 conditions {field:"family", op:"eq", value:"X"}，所有組長用 {field:"family_role", op:"eq", value:"owner"}。成員可以在別的列表，用郵箱地址指定即可。
+${this.agentCfg.agent_computer ? `- 操作電腦：用戶給出電腦上的路徑時直接用 fs_* 工具（路徑原樣傳入，少冒號、斜槓方向都沒關係；不存在時根據返回的 similar / entries 找到最像的那個再試，不要讓用戶重新輸入）。
+  · 統計 / 導入文件裡的郵箱：先 fs_scan_accounts 得到 scan_id 和統計（不要用 fs_read 把賬號文件讀出來，裡面有密碼）。之後用 filter.scan_id 操作這些郵箱：已在當前列表的用 update_accounts({filter:{scan_id}, set:{add_groups:["X"]}}) 加分組；不在列表裡的（not_in_sheet > 0）用 import_text({scan_id, group:"X"}) 導入並放進分組（已在的自動跳過）。用戶只說「統計」時只匯報數字（文件數、郵箱數、重複、已在 / 未在列表）。
+  · 執行命令（run_command）只在文件工具做不到時用，用戶每次都要確認；不要刪除文件、改系統設置。
+` : ''}- 家庭組 ≠ 分組：分組只是標籤；家庭組是郵箱之間的關係（一個組長 + 成員，例如 Google 家庭組 / YouTube 家庭方案），用 manage_families。「把 A 設為組長，B、C 加進去」→ manage_families create（或 set_owner + add_members）；「看 X 家庭組 / 誰是組長」→ manage_families list 或 set_view({family})；篩選家庭組成員用 conditions {field:"family", op:"eq", value:"X"}，所有組長用 {field:"family_role", op:"eq", value:"owner"}。成員可以在別的列表，用郵箱地址指定即可。
 - 用戶糾正你（「不是這個意思」「我說的是…」「錯了」）：先用 undo 撤銷剛才理解錯的那一步，再按正確的理解重新做，並說明已撤銷了什麼。
 - 多步任務就連續調用多個工具一次做完。信息不足時先用查詢類工具弄清楚；只有確實無法判斷用戶意圖時才提問。
 - 用戶給了賬號數據要導入/添加：原始文本直接 import_text（無法識別的行你自己整理後用 add_accounts 補上）；你已經理解了字段就用 add_accounts。可以同時指定分組、狀態、國家、自定義列（例如「編號」）。
@@ -633,7 +684,9 @@ ${learnRule}- 用戶粘貼的內容常夾雜從網頁複製來的雜訊（圖標
 - 「把備註列放到郵箱後面，隱藏手機號」→ manage_columns({action:"move",name:"備註",after:"郵箱"}) + manage_columns({action:"hide",name:"手機號"})
 - 「分組 29 移到第一個 / 置頂」→ manage_groups({action:"move",name:"29",position:1})；「29 分組往上移一位」→ manage_groups({action:"move",name:"29",offset:-1})
 - 「把 新號 分組放到 222 後面」→ manage_groups({action:"move",name:"新號",after:"222"})；「默認列表放最後」→ manage_sheets({action:"move",name:"默認列表",position:-1})
-- 「剛才改錯了」→ undo
+- 「剛才改錯了」→ undo${this.agentCfg.agent_computer ? `
+- 「統計 E\\workspace\\號池\\新號商 的郵箱並加到 yutoux 分組」→ fs_scan_accounts({path:"E\\workspace\\號池\\新號商"}) → update_accounts({filter:{scan_id}, set:{add_groups:["yutoux"]}}) → 有 not_in_sheet 時 import_text({scan_id, group:"yutoux"})
+- 「把 yutoux 分組導出到桌面」→ export_accounts({filter:{conditions:[{field:"group",op:"eq",value:"yutoux"}]}, format:"txt", path: 桌面路徑})` : ''}
 ${SELFMAIL ? `
 你現在在「自建郵箱管理」窗口：表格裡的每一行就是 BillionMail 後台的一個真實郵箱（郵箱 + 登錄密碼）。
 - 新建郵箱用 create_mailboxes（會在後台創建）；delete_accounts 會在後台刪除郵箱，不可撤銷；修改密碼、把狀態改成 / 改離「停用」會同步到後台，也不可撤銷。分組、備註、自定義列只存在本地，可以撤銷。
@@ -688,9 +741,28 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'copy_to_clipboard': return this.agentCopy(args);
         case 'export_accounts': {
           const rows = this.agentRows(args.filter);
-          await this.doExport(args.format === 'txt' ? 'txt' : 'csv', rows);
+          const fmt = args.format === 'txt' ? 'txt' : 'csv';
+          if (args.path) {  // 直接保存到指定位置；給的是文件夾就自動起文件名
+            let path = String(args.path).trim().replace(/^["']|["']$/g, '');
+            if (!/\.(csv|txt)$/i.test(path)) {
+              const d = new Date(), p2 = n => String(n).padStart(2, '0');
+              path = path.replace(/[\\/]+$/, '') + `\\mail_export_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}.${fmt}`;
+            }
+            const r = await call('fs_write', path, this.buildExport(rows, fmt), false, !!args.overwrite);
+            return r.error ? r : { exported: rows.length, path: r.path };
+          }
+          await this.doExport(fmt, rows);
           return { exported: rows.length };
         }
+        case 'fs_list': return call('fs_list', args.path, args.pattern || '', !!args.recursive, args.limit || 200);
+        case 'fs_scan_accounts': return this.agentScan(args);
+        case 'fs_read': return call('fs_read', args.path, args.offset || 1, args.limit || 200);
+        case 'fs_search': return call('fs_search', args.path, args.query || '', !!args.regex, args.pattern || '', args.recursive !== false);
+        case 'fs_write': return call('fs_write', args.path, args.content ?? '', !!args.append, !!args.overwrite);
+        case 'fs_move': return call('fs_move', args.from, args.to, !!args.copy);
+        case 'fs_mkdir': return call('fs_mkdir', args.path);
+        case 'fs_open': return call('fs_reveal', args.path);
+        case 'run_command': return call('run_command', args.command, args.cwd || '', args.timeout || 60);
         case 'create_recovery_mailboxes': {
           const rows = this.agentRows(args.filter);
           const undoId = this.agentPushUndo(t('agent.tool.create_recovery_mailboxes'), { rows: this.agentSnapshot(rows) });
@@ -774,6 +846,13 @@ ${learned ? '\n' + learned + '\n' : ''}
           }
           case 'manage_columns': return t('agent.confirm.deleteColumn', { s: args.name });
           case 'manage_groups': return t('agent.confirm.deleteGroup', { s: args.name });
+          case 'fs_read': case 'fs_search': return t('agent.confirm.fsRead') + '\n' + args.path + (args.query ? `\n🔍 ${args.query}` : '');
+          case 'fs_write': return t(args.append ? 'agent.confirm.fsAppend' : args.overwrite ? 'agent.confirm.fsOverwrite' : 'agent.confirm.fsWrite') +
+            '\n' + args.path + '\n' + String(args.content ?? '').slice(0, 300) + (String(args.content ?? '').length > 300 ? '…' : '');
+          case 'fs_move': return t(args.copy ? 'agent.confirm.fsCopy' : 'agent.confirm.fsMove') + `\n${args.from}\n→ ${args.to}`;
+          case 'fs_mkdir': return t('agent.confirm.fsMkdir') + '\n' + args.path;
+          case 'run_command': return t('agent.confirm.command') + '\n' + args.command + (args.cwd ? `\n📁 ${args.cwd}` : '');
+          case 'export_accounts': return t('agent.confirm.exportTo', { n: this.agentRows(args.filter).length }) + '\n' + args.path;
           case 'manage_families': {
             if (args.action === 'delete') return t('agent.confirm.deleteFamily', { s: args.name });
             const who = [args.owner ? '👑 ' + args.owner : '', ...(args.members || []), args.filter ? t('agent.confirm.byFilter', { n: this.agentRows(args.filter).length }) : '']
@@ -833,6 +912,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         list = list.slice(from - 1, to);
       }
       if (f.ids?.length) { const set = new Set(f.ids.map(Number)); list = list.filter(a => set.has(a.id)); }
+      if (f.scan_id) { const set = new Set(this.agentScanOrThrow(f.scan_id).emails); list = list.filter(a => set.has(a.email.toLowerCase())); }
       if (f.emails?.length) {
         const set = new Set(f.emails.map(e => String(e).trim().toLowerCase()));
         list = list.filter(a => set.has(a.email.toLowerCase()));
@@ -1201,6 +1281,11 @@ ${learned ? '\n' + learned + '\n' : ''}
       return { added, skipped, invalid, sheet: this.sheetName(this.currentSheet), undo_id: undoId };
     },
     async agentImportText(args) {
+      if (args.scan_id) {
+        const sc = this.agentScanOrThrow(args.scan_id);
+        args = { ...args, text: sc.emails.map(e => sc.lines[e]).join('\n') };
+      }
+      if (!String(args.text || '').trim()) throw new Error('text or scan_id is required');
       const p = parseImport(args.text || '', 'auto', 'smart', []);
       const accounts = p.rows.map(({ country, ...r }) => ({ ...r, country, columns: args.columns }));
       const r = await this.agentAdd(accounts, args);
@@ -1563,6 +1648,36 @@ ${learned ? '\n' + learned + '\n' : ''}
       }
       return { error: 'unknown action ' + args.action };
     },
+    // ---------- 操作電腦：統計文件裡的郵箱 ----------
+    // 掃描結果（全部郵箱 + 原始行）只留在本地，給 AI 的是統計和 scan_id，密碼不會發給 AI
+    async agentScan(args) {
+      const r = await call('fs_scan', args.path, args.pattern || '', args.recursive !== false);
+      if (r.error) return r;
+      const id = 'scan' + (Object.keys(this._agentScans || {}).length + 1);
+      this._agentScans = { ...(this._agentScans || {}), [id]: { emails: r.emails, lines: r.lines, path: r.path } };
+      const inSheet = new Set(this.accounts.map(a => a.email.toLowerCase()));
+      const cur = r.emails.filter(e => inSheet.has(e));
+      const other = r.emails.filter(e => !inSheet.has(e) && r.sheets[e]);
+      const sheetNames = ids => [...new Set(ids)].map(sid => this.sheetName(this.sheets.find(s => s.id === sid) || { name: '?' }));
+      const out = {
+        scan_id: id, path: r.path, files_with_accounts: r.files.length, files_scanned: r.files_scanned,
+        files: r.files.slice(0, 50), unique_emails: r.emails.length, duplicate_lines: r.duplicates,
+        in_current_sheet: cur.length, in_other_sheets: other.length, not_in_sheet: r.emails.length - cur.length,
+        not_in_any_sheet: r.emails.length - cur.length - other.length,
+        domains: Object.entries(r.emails.reduce((m, e) => { const d = domainOf(e); m[d] = (m[d] || 0) + 1; return m; }, {}))
+          .sort((a, b) => b[1] - a[1]).slice(0, 10).map(([domain, count]) => ({ domain, count })),
+        skipped_files: r.skipped.length ? r.skipped : undefined,
+      };
+      if (other.length) out.other_sheets = sheetNames(other.flatMap(e => r.sheets[e]));
+      if (r.emails.length <= 100) out.emails = r.emails; else out.sample = r.emails.slice(0, 20);
+      return out;
+    },
+    agentScanOrThrow(id) {
+      const sc = this._agentScans?.[id];
+      if (!sc) throw new Error(`scan "${id}" not found (scans are kept only until the app is closed), run fs_scan_accounts again`);
+      return sc;
+    },
+
     // ---------- 家庭組 ----------
     // 郵箱地址 → 賬號 id（先找當前列表，找不到再到所有列表裡找）
     async agentAccountIds(emails) {

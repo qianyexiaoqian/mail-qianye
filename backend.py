@@ -26,6 +26,7 @@ except ImportError:
 
 import aifix
 import billionmail
+import fsagent
 import mailfetch
 import vault
 
@@ -1275,7 +1276,9 @@ class Api:
     # ---------- AI 糾錯（OpenAI 兼容接口） ----------
     _AI_DEFAULTS = {"base_url": aifix.DEFAULT_BASE_URL, "model": aifix.DEFAULT_MODEL, "prompt": ""}
     # AI 助手：攜帶最近多少輪對話、上下文最多多少字；自動學習（AI 可以記經驗、寫技能）；換對話時自動總結經驗
-    _AGENT_DEFAULTS = {"agent_max_turns": 20, "agent_max_chars": 150000, "agent_learn": True, "agent_reflect": True}
+    # agent_computer：允許 AI 助手讀寫電腦上的文件、執行命令（寫入和命令每次都要用戶確認）
+    _AGENT_DEFAULTS = {"agent_max_turns": 20, "agent_max_chars": 150000, "agent_learn": True, "agent_reflect": True,
+                       "agent_computer": True}
     _AI_SECRETS = ("api_key",)
 
     def _ai_config(self, with_secret=False):
@@ -1470,6 +1473,62 @@ class Api:
                         st.conn.execute("INSERT OR REPLACE INTO family_members(family_id, account_id, role) VALUES (?, ?, ?)",
                                         (fid, int(r["id"]), role))
             st.conn.commit()
+
+    # ---------- AI 助手操作電腦（文件、命令），見 fsagent.py ----------
+    def _computer(self, fn, *args):
+        if not self._ai_config().get("agent_computer", True):
+            raise PermissionError("err.computer_off")
+        try:
+            return fn(*args)
+        except (OSError, ValueError, re.error) as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    @need_unlock
+    def fs_info(self):
+        return fsagent.computer_info()
+
+    @need_unlock
+    def fs_list(self, path, pattern="", recursive=False, limit=200):
+        return self._computer(fsagent.list_dir, path, pattern, recursive, limit)
+
+    @need_unlock
+    def fs_read(self, path, offset=1, limit=200):
+        return self._computer(fsagent.read_file, path, offset, limit)
+
+    @need_unlock
+    def fs_search(self, path, query, regex=False, pattern="", recursive=True):
+        return self._computer(fsagent.search, path, query, regex, pattern, recursive)
+
+    @need_unlock
+    def fs_scan(self, path, pattern="", recursive=True):
+        """統計文件裡的郵箱賬號，並標出每個郵箱已經在哪些列表裡。"""
+        r = self._computer(fsagent.scan_accounts, path, pattern, recursive)
+        if "emails" in r:
+            where = {}
+            for row in self._store.query("SELECT lower(email) AS e, sheet_id FROM accounts"):
+                where.setdefault(row["e"], []).append(row["sheet_id"])
+            r["sheets"] = {e: where[e] for e in r["emails"] if e in where}
+        return r
+
+    @need_unlock
+    def fs_write(self, path, content, append=False, overwrite=False):
+        return self._computer(fsagent.write_file, path, content, append, overwrite)
+
+    @need_unlock
+    def fs_move(self, src, dest, copy=False):
+        return self._computer(fsagent.move, src, dest, copy)
+
+    @need_unlock
+    def fs_mkdir(self, path):
+        return self._computer(fsagent.mkdir, path)
+
+    @need_unlock
+    def fs_reveal(self, path):
+        return self._computer(fsagent.reveal, path)
+
+    @need_unlock
+    def run_command(self, command, cwd="", timeout=60):
+        return self._computer(fsagent.run_command, command, cwd, timeout)
 
     @need_unlock
     def save_export(self, filename, content):
