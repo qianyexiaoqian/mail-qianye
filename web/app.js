@@ -342,9 +342,22 @@ const app = createApp({
       return c.status.running ? c.status.url : `http://127.0.0.1:${c.port}`;
     },
     apiDoc() { return API_DOCS.find(d => d.id === this.apiPage?.sel) || null; },
+    apiMcpUrl() { return this.apiBase ? this.apiBase + '/mcp' : ''; },
+    // 各種 AI 工具的 MCP 配置寫法
+    apiMcpConfigs() {
+      const url = this.apiMcpUrl, auth = { Authorization: 'Bearer <API_KEY>' };
+      const json = server => JSON.stringify({ mcpServers: { 'mail-manager': server } }, null, 2);
+      return [
+        { label: 'Claude Code', code: `claude mcp add --transport http mail-manager ${url} --header "Authorization: Bearer <API_KEY>"` },
+        { label: 'Cursor', code: json({ url, headers: auth }) },
+        { label: t('mcp.generic'), code: json({ type: 'http', url, headers: auth }) },
+        { label: 'Cherry Studio', code: json({ type: 'streamableHttp', baseUrl: url, headers: auth }) },
+        { label: t('mcp.urlOnly'), code: `${url}?token=<API_KEY>` },
+      ];
+    },
     apiExamples() {
       const d = this.apiDoc;
-      if (!d || !d.path) return [];
+      if (!d || !d.path || d.kind === 'mcp') return [];
       const q = new URLSearchParams(Object.entries(d.query || {})).toString();
       const url = this.apiBase + d.path + (q ? '?' + q : '');
       const py = Object.keys(d.query || {}).length ? `, params=${JSON.stringify(d.query)}` : '';
@@ -486,7 +499,8 @@ const app = createApp({
     async openApiPage(docId = null) {
       this.settings = null;
       const cfg = await call('get_api_config');
-      this.apiPage = { cfg, port: cfg.port, show: false, sel: docId, view: 'docs', tryParams: {}, tryResult: null, trying: false, busy: false };
+      this.apiPage = { cfg, port: cfg.port, show: false, sel: docId, view: 'docs', tryParams: {}, tryResult: null, trying: false, busy: false,
+        mcpTools: null, mcpTool: '', mcpArgs: '{}' };
       if (docId) this.apiOpenDoc(API_DOCS.find(d => d.id === docId));
     },
     // 開關、端口、局域網、鎖定時可讀：改了立即生效
@@ -521,7 +535,33 @@ const app = createApp({
     apiOpenDoc(d) {
       if (!d) return;
       Object.assign(this.apiPage, { sel: d.id, view: 'docs', tryParams: { ...(d.query || {}) }, tryResult: null });
+      if (d.id === 'mcpTools' && !this.apiPage.mcpTools) {
+        call('api_mcp_tools').then(tools => {
+          if (!this.apiPage) return;
+          this.apiPage.mcpTools = tools;
+          if (!this.apiPage.mcpTool) this.apiMcpPick(tools[0]?.name);
+        });
+      }
     },
+    // MCP 調試：選工具、填參數（JSON）、調用；結果是 AI 工具實際收到的 JSON-RPC 響應
+    apiMcpPick(name) {
+      Object.assign(this.apiPage, { mcpTool: name, mcpArgs: JSON.stringify(MCP_EXAMPLE_ARGS[name] || {}, null, 2), tryResult: null });
+    },
+    async apiMcpCall(method = 'tools/call') {
+      const page = this.apiPage;
+      let params = {};
+      if (method === 'tools/call') {
+        let args;
+        try { args = JSON.parse(page.mcpArgs || '{}'); } catch { return this.toast(t('mcp.argsBad'), 'error'); }
+        params = { name: page.mcpTool, arguments: args };
+      }
+      page.trying = true;
+      try { page.tryResult = await call('api_mcp_try', method, params); }
+      catch (e) { page.tryResult = { status: 0, ms: 0, body: errText(e), error: true }; }
+      page.trying = false;
+      this.apiRefresh();
+    },
+    apiSchemaType(s) { return s.enum ? s.enum.join(' | ') : s.type === 'array' ? `${s.items?.type || ''}[]` : s.type; },
     async apiTry() {
       const page = this.apiPage, d = this.apiDoc;
       page.trying = true;

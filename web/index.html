@@ -954,6 +954,11 @@
             <button :title="apiPage.cfg.token ? t('api.regen') : t('api.gen')" @click="apiRegen">⟳</button>
           </div>
         </div>
+        <div class="api-row">
+          <span class="api-label">⛏ MCP</span>
+          <div class="api-input"><input readonly class="mono" :value="apiMcpUrl"><button @click="copy(apiMcpUrl, 'MCP')">{{ t('api.copy') }}</button></div>
+          <button class="link api-mcp-note" @click="apiOpenDoc(apiDocs.find(d => d.id === 'mcpSetup'))">{{ t('mcp.transport') }} <sup>new</sup></button>
+        </div>
         <div class="api-row api-opts">
           <span class="api-label">{{ t('api.port') }}</span>
           <input class="api-port" type="number" min="1" max="65535" v-model.number="apiPage.port" :disabled="apiPage.busy"
@@ -989,7 +994,7 @@
               <div class="api-doc-title">{{ t('apidoc.' + d.id + '.title') }}</div>
               <template v-if="d.path">
                 <div class="api-doc-line"><b>path</b> : <span class="api-path">{{ d.path }}</span></div>
-                <div class="api-doc-line"><b>method</b> : GET</div>
+                <div class="api-doc-line"><b>method</b> : {{ d.method || 'GET' }}</div>
               </template>
               <div v-else class="api-doc-line muted">{{ t('apidoc.auth.short') }}</div>
             </div>
@@ -1001,7 +1006,50 @@
           <h4>{{ t('apidoc.' + apiDoc.id + '.title') }}</h4>
           <p class="api-desc">{{ t('apidoc.' + apiDoc.id + '.desc') }}</p>
 
-          <template v-if="apiDoc.path">
+          <template v-if="apiDoc.id === 'mcpSetup'">
+            <div class="api-endpoint"><span class="api-method post">POST</span><code class="mono">{{ apiMcpUrl }}</code>
+              <button class="btn sm" @click="copy(apiMcpUrl, 'MCP')">{{ t('api.copy') }}</button></div>
+            <div class="api-sub">{{ t('mcp.configs') }}</div>
+            <div v-for="ex in apiMcpConfigs" :key="ex.label" class="api-example">
+              <span class="api-ex-label wide">{{ ex.label }}</span>
+              <pre class="api-code">{{ ex.code }}</pre>
+              <button class="btn sm" :title="t('apidoc.copyWithKey')" @click="apiCopyCode(ex.code)">{{ t('api.copy') }}</button>
+            </div>
+            <div class="muted mail-hint">{{ t('mcp.notes') }}</div>
+            <div><button class="btn sm" @click="apiOpenDoc(apiDocs.find(d => d.id === 'mcpTools'))">{{ t('apidoc.mcpTools.title') }} →</button></div>
+          </template>
+
+          <template v-else-if="apiDoc.id === 'mcpTools'">
+            <div v-if="!apiPage.mcpTools" class="muted">…</div>
+            <div v-for="tl in apiPage.mcpTools || []" :key="tl.name" class="api-tool">
+              <div class="api-tool-head"><code class="mono">{{ tl.name }}</code><b>{{ tl.title }}</b>
+                <span class="spacer"></span><button class="link" @click="apiMcpPick(tl.name); $nextTick(() => $refs.mcpTry && $refs.mcpTry.scrollIntoView({block: 'nearest'}))">{{ t('mcp.tryThis') }}</button></div>
+              <div class="api-desc">{{ tl.description }}</div>
+              <table v-if="Object.keys(tl.inputSchema.properties).length" class="api-table api-params">
+                <tr v-for="(sc, name) in tl.inputSchema.properties" :key="name"><td class="mono">{{ name }}</td><td class="mono muted">{{ apiSchemaType(sc) }}</td><td>{{ sc.description }}</td></tr>
+              </table>
+            </div>
+            <div ref="mcpTry" class="api-sub">{{ t('apidoc.try') }}</div>
+            <div class="api-mcp-try">
+              <div class="editor-row">
+                <select v-model="apiPage.mcpTool" @change="apiMcpPick(apiPage.mcpTool)">
+                  <option v-for="tl in apiPage.mcpTools || []" :key="tl.name" :value="tl.name">{{ tl.name }}</option>
+                </select>
+                <button class="btn primary sm" :disabled="apiPage.trying || !apiPage.cfg.status.running || !apiPage.mcpTool" @click="apiMcpCall()">▶ {{ t('mcp.call') }}</button>
+                <button class="btn sm" :disabled="apiPage.trying || !apiPage.cfg.status.running" @click="apiMcpCall('tools/list')">tools/list</button>
+                <span v-if="!apiPage.cfg.status.running" class="muted">{{ t('apidoc.needRunning') }}</span>
+                <template v-if="apiPage.tryResult">
+                  <span class="api-pill" :class="apiPage.tryResult.status === 200 ? 'on' : 'err'">{{ apiPage.tryResult.status || '—' }}</span>
+                  <span class="muted">{{ apiPage.tryResult.ms }} ms</span>
+                </template>
+              </div>
+              <label class="muted">{{ t('mcp.args') }}</label>
+              <textarea v-model="apiPage.mcpArgs" rows="4" class="mono" spellcheck="false"></textarea>
+              <pre v-if="apiPage.tryResult" class="api-code api-result">{{ apiPage.tryResult.body || '(empty)' }}</pre>
+            </div>
+          </template>
+
+          <template v-else-if="apiDoc.path">
             <div class="api-endpoint"><span class="api-method">GET</span><code class="mono">{{ apiBase + apiDoc.path }}</code>
               <button class="btn sm" @click="copy(apiBase + apiDoc.path)">{{ t('api.copy') }}</button></div>
 

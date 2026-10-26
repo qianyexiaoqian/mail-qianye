@@ -1,7 +1,7 @@
 // 本地 API 接口文檔（API 接口頁面用）：分類、路徑、參數、示例請求和示例返回。
 // 標題、說明、參數說明在 i18n.js：apidoc.<id>.title / apidoc.<id>.desc / apidoc.p.<參數名>
 
-const API_DOC_CATS = ['mail', 'meta', 'sys'];
+const API_DOC_CATS = ['mail', 'meta', 'mcp', 'sys'];
 
 const API_SAMPLE_ACCOUNT = {
   id: 12, email: 'user@gmail.com', password: 'Passw0rd!', totp_secret: 'JBSWY3DPEHPK3PXP', totp_code: '492039', totp_remaining: 17,
@@ -51,7 +51,18 @@ const API_DOCS = [
     response: { ok: true, locked: true, readable: true, time: 1790000000 },
   },
   { id: 'auth', cat: 'sys', path: '', query: {}, params: [] },
+  // MCP：給 AI 工具（Claude Code、Cursor、Cherry Studio…）用，POST JSON-RPC
+  { id: 'mcpSetup', cat: 'mcp', path: '/mcp', method: 'POST', kind: 'mcp', query: {}, params: [] },
+  { id: 'mcpTools', cat: 'mcp', path: '/mcp', method: 'POST', kind: 'mcp', query: {}, params: [] },
 ];
 
 // 狀態碼說明（認證與錯誤碼頁）
 const API_STATUS_CODES = [200, 400, 401, 404, 405, 423, 500];
+
+// MCP 調試時每個工具預填的參數
+const MCP_EXAMPLE_ARGS = {
+  list_accounts: { group: 'yutoux', fields: ['email', 'password', 'totp_code'] },
+  get_account: { email: 'user@gmail.com' },
+  get_2fa_code: { email: 'user@gmail.com' },
+  export_accounts_text: { group: 'yutoux' },
+};

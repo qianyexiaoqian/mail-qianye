@@ -29,6 +29,7 @@ except ImportError:
 
 import aifix
 import apiserver
+import mcpserver
 import billionmail
 import fsagent
 import mailfetch
@@ -1674,6 +1675,44 @@ class Api:
                 pass
         return {"status": status, "ms": int((time.time() - started) * 1000), "url": url,
                 "body": text[:50000], "truncated": len(text) > 50000}
+
+    @need_unlock
+    def api_mcp_tools(self):
+        return mcpserver.tool_list()
+
+    @need_unlock
+    def api_mcp_try(self, method, params=None):
+        """接口頁面的 MCP 調試：向本機 /mcp 發一條 JSON-RPC 請求（和 AI 工具發的一樣）。"""
+        import urllib.error
+        import urllib.request
+
+        st = self._http_api.status()
+        if not st["running"]:
+            raise ValueError("err.api_not_running")
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{st['port']}/mcp", data=body, method="POST", headers={
+            "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+            "Authorization": "Bearer " + self._cipher.decrypt(self._api_cfg()["token"])})
+        started = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                status, raw = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            status, raw = e.code, e.read()
+        text = raw.decode("utf-8", "replace")
+        try:
+            data = json.loads(text)
+            # 工具結果裡的 JSON 文本也展開，方便看
+            for c in (data.get("result") or {}).get("content") or []:
+                if c.get("type") == "text":
+                    try:
+                        c["text"] = json.loads(c["text"])
+                    except ValueError:
+                        pass
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+        except ValueError:
+            pass
+        return {"status": status, "ms": int((time.time() - started) * 1000), "body": text[:50000]}
 
     # API 請求的數據（在 API 服務線程裡調用）。返回 (body, 是否純文本)
     def _api_handle(self, path, p, token=""):

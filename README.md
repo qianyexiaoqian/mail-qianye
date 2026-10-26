@@ -128,6 +128,14 @@ curl -H "Authorization: Bearer <Token>" "http://127.0.0.1:8686/api/accounts?grou
 curl "http://127.0.0.1:8686/api/accounts?format=txt&fields=email,password,totp_code&token=<Token>"
 ```
 
+### MCP（給 AI 工具用）
+
+同一個服務上的 `http://127.0.0.1:8686/mcp`，傳輸方式是可流式傳輸的 HTTP（Streamable HTTP），用同一個 API 密鑰認證。Claude Code、Cursor、Cherry Studio 等 AI 工具接入後，可以直接說「把 yutoux 分組的郵箱和 2FA 驗證碼列出來」。工具全部只讀：`list_accounts`、`get_account`、`get_2fa_code`、`export_accounts_text`、`list_groups`、`list_sheets`、`list_families`。API 接口頁面的「MCP」分類裡有各種 AI 工具的配置示例和在線調試。
+
+```bash
+claude mcp add --transport http mail-manager http://127.0.0.1:8686/mcp --header "Authorization: Bearer <Token>"
+```
+
 ## 開發
 
 ```bash
@@ -146,6 +154,8 @@ curl "http://127.0.0.1:8686/api/accounts?format=txt&fields=email,password,totp_c
 - `billionmail.py` — BillionMail 後台管理員客戶端（取郵箱登錄密碼）
 - `aifix.py` — AI 糾錯（OpenAI 兼容 /chat/completions 流式請求、默認提示詞）
 - `apiserver.py` — 本地只讀 HTTP API（Token 校驗、請求記錄）
+- `mcpserver.py` — MCP 接口（JSON-RPC 處理、工具定義），掛在 API 服務的 `/mcp`
+- `web/apidocs.js` — API 接口頁面的文檔數據（分類、參數、示例）
 - `fsagent.py` — AI 助手操作電腦用的文件 / 命令工具
 - `web/importer.js` — 批量導入的分行、字段識別（智能 / 按順序）
 - `web/agent.js` — AI 助手（工具定義、對話循環、工具執行）
