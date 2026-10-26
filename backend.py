@@ -3,7 +3,9 @@
 所有給前端調用的方法都在 Api 類裡，pywebview 通過 js_api 暴露，
 開發模式下 devserver.py 通過 HTTP 暴露同一個類。
 """
+import base64
 import functools
+import hashlib
 import json
 import os
 import re
@@ -288,6 +290,7 @@ class Api:
             time.sleep(0.5)  # 減慢暴力嘗試
             raise vault.WrongPassword("err.wrong_password")
         self._cipher = cipher
+        self._api_ensure_wrapped()
 
     def lock(self):
         self._cipher = None
@@ -320,6 +323,10 @@ class Api:
                     changed = True
             if changed:
                 settings[name] = json.dumps(cfg, ensure_ascii=False)
+        api = json.loads(settings.get("api_config") or self._store.get_setting("api_config") or "{}")
+        if api.get("wrapped_key") and api.get("token"):  # 鎖定時也能讀的 API：數據密鑰換了，用 Token 重新包裝
+            api["wrapped_key"] = self._api_wrap(cipher.key, cipher.decrypt(api["token"]))
+            settings["api_config"] = json.dumps(api)
         kb = self._store.get_setting("agent_kb")  # AI 助手的技能和經驗（整塊加密）
         if kb:
             settings["agent_kb"] = cipher.encrypt(old.decrypt(kb) if old else kb)
@@ -351,9 +358,10 @@ class Api:
             values[f] = self._cipher.encrypt(values.get(f, ""))
         return values
 
-    def _decrypt_row(self, row):
+    def _decrypt_row(self, row, cipher=None):
+        cipher = cipher or self._cipher
         for f in SECRET_FIELDS:
-            row[f] = self._cipher.decrypt(row[f])
+            row[f] = cipher.decrypt(row[f])
         return row
 
     # ---------- 界面偏好（不需要解鎖，鎖屏也要用主題和語言） ----------
@@ -1534,7 +1542,9 @@ class Api:
         return self._computer(fsagent.run_command, command, cwd, timeout)
 
     # ---------- 本地 HTTP API（見 apiserver.py）：默認關閉；Token 只能隨機生成，校驗用哈希，明文加密保存 ----------
-    _API_DEFAULTS = {"enabled": False, "port": 8686, "lan": False}
+    # allow_locked：軟件鎖定（或剛啟動還沒解鎖）時也能讀取。做法是把數據密鑰用 Token 加密一份（wrapped_key），
+    # 帶正確 Token 的請求才能解開；數據庫文件本身不含 Token 明文，所以不帶 Token 仍然讀不出數據
+    _API_DEFAULTS = {"enabled": False, "port": 8686, "lan": False, "allow_locked": True}
     _API_SECRETS = ("token",)
 
     def _api_cfg(self):
@@ -1558,13 +1568,54 @@ class Api:
         token = "mm_" + secrets.token_urlsafe(32)
         cfg["token"] = self._cipher.encrypt(token)
         cfg["token_hash"] = apiserver.token_hash(token)
+        cfg.pop("wrapped_key", None)
+        self._api_sync_wrap(cfg)
+
+    @staticmethod
+    def _api_token_cipher(token):
+        return vault.Cipher(hashlib.sha256(b"mail-manager-api-key:" + token.encode()).digest())
+
+    def _api_wrap(self, key, token):
+        return self._api_token_cipher(token).encrypt(base64.b64encode(key).decode())
+
+    def _api_sync_wrap(self, cfg):
+        """按 allow_locked 生成或刪除 Token 包裝的數據密鑰（需要已解鎖）。"""
+        if cfg.get("allow_locked") and cfg.get("token"):
+            if not cfg.get("wrapped_key"):
+                cfg["wrapped_key"] = self._api_wrap(self._cipher.key, self._cipher.decrypt(cfg["token"]))
+        else:
+            cfg.pop("wrapped_key", None)
+
+    def _api_ensure_wrapped(self):
+        cfg = self._api_cfg()
+        had = cfg.get("wrapped_key")
+        self._api_sync_wrap(cfg)
+        if cfg.get("wrapped_key") != had:
+            self._api_save(cfg)
+
+    def _api_read_cipher(self, token):
+        """API 讀數據用的密鑰：已解鎖就用當前的；鎖定時用 Token 解開包裝的數據密鑰。"""
+        if self._cipher is not None:
+            return self._cipher
+        cfg = self._api_cfg()
+        if not cfg.get("allow_locked") or not cfg.get("wrapped_key") or not token:
+            raise PermissionError("locked")
+        try:
+            cipher = vault.Cipher(base64.b64decode(self._api_token_cipher(token).decrypt(cfg["wrapped_key"])))
+        except (vault.WrongPassword, ValueError):
+            raise PermissionError("locked")
+        if not cipher.check(self._store.get_setting("verifier")):
+            raise PermissionError("locked")
+        return cipher
+
+    def _api_public(self, cfg):
+        return {"enabled": cfg["enabled"], "port": cfg["port"], "lan": cfg["lan"], "allow_locked": bool(cfg.get("allow_locked")),
+                "token": self._cipher.decrypt(cfg["token"]) if cfg.get("token") else "",
+                "status": self._http_api.status(), "log": list(self._http_api.log)[:30]}
 
     @need_unlock
     def get_api_config(self):
-        cfg = self._api_cfg()
-        return {"enabled": cfg["enabled"], "port": cfg["port"], "lan": cfg["lan"],
-                "token": self._cipher.decrypt(cfg["token"]) if cfg.get("token") else "",
-                "status": self._http_api.status(), "log": list(self._http_api.log)[:30], "endpoints": apiserver.ENDPOINTS}
+        return self._api_public(self._api_cfg())
 
     @need_unlock
     def set_api_config(self, cfg):
@@ -1575,9 +1626,11 @@ class Api:
             port = 0
         if not 1 <= port <= 65535:
             raise ValueError("err.api_port")
-        cur.update(enabled=bool(cfg.get("enabled")), port=port, lan=bool(cfg.get("lan")))
+        cur.update(enabled=bool(cfg.get("enabled")), port=port, lan=bool(cfg.get("lan")),
+                   allow_locked=bool(cfg.get("allow_locked", cur.get("allow_locked", True))))
         if cur["enabled"] and not cur.get("token_hash"):  # 第一次打開自動生成 Token
             self._api_new_token(cur)
+        self._api_sync_wrap(cur)
         self._api_save(cur)
         self.start_http_api()
         return self.get_api_config()
@@ -1594,12 +1647,42 @@ class Api:
     def api_status(self):
         return {"status": self._http_api.status(), "log": list(self._http_api.log)[:30]}
 
+    @need_unlock
+    def api_try(self, path, params=None):
+        """接口文檔裡的「發送請求」：真正向本機運行中的 API 發一個 GET 請求，返回狀態碼、耗時和內容。"""
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        st = self._http_api.status()
+        if not st["running"]:
+            raise ValueError("err.api_not_running")
+        query = urllib.parse.urlencode({k: v for k, v in (params or {}).items() if str(v).strip() != ""})
+        url = f"http://127.0.0.1:{st['port']}{path}" + (f"?{query}" if query else "")
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + self._cipher.decrypt(self._api_cfg()["token"])})
+        started = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                status, ctype, body = r.status, r.headers.get_content_type(), r.read()
+        except urllib.error.HTTPError as e:
+            status, ctype, body = e.code, e.headers.get_content_type(), e.read()
+        text = body.decode("utf-8", "replace")
+        if ctype == "application/json":
+            try:
+                text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+            except ValueError:
+                pass
+        return {"status": status, "ms": int((time.time() - started) * 1000), "url": url,
+                "body": text[:50000], "truncated": len(text) > 50000}
+
     # API 請求的數據（在 API 服務線程裡調用）。返回 (body, 是否純文本)
-    def _api_handle(self, path, p):
+    def _api_handle(self, path, p, token=""):
         if path == "/api/health":
-            return {"ok": True, "locked": self._cipher is None, "time": int(time.time())}, False
-        if self._cipher is None:
-            raise PermissionError("locked")
+            cfg = self._api_cfg()
+            return {"ok": True, "locked": self._cipher is None,
+                    "readable": self._cipher is not None or bool(cfg.get("allow_locked") and cfg.get("wrapped_key")),
+                    "time": int(time.time())}, False
+        cipher = self._api_read_cipher(token)
         if path in ("/", "/api"):
             return {"endpoints": apiserver.ENDPOINTS}, False
         ctx = self._api_context()
@@ -1625,19 +1708,19 @@ class Api:
             emails = {e.strip().lower() for e in (p.get("email") or "").split(",") if e.strip()}
             if not emails:
                 raise apiserver.ApiError(400, "email or secret is required")
-            rows = [self._api_account(r, ctx) for r in self._api_rows() if r["email"].lower() in emails]
+            rows = [self._api_account(r, ctx) for r in self._api_rows(cipher) if r["email"].lower() in emails]
             if not rows:
                 raise apiserver.ApiError(404, "account not found")
             return {"codes": [{"email": a["email"], "code": a["totp_code"], "remaining": a["totp_remaining"],
                                **({"error": a["totp_error"]} if a.get("totp_error") else {})} for a in rows]}, False
         if path == "/api/account":
             email, aid = (p.get("email") or "").strip().lower(), p.get("id")
-            for r in self._api_rows():
+            for r in self._api_rows(cipher):
                 if (aid and str(r["id"]) == str(aid)) or (email and r["email"].lower() == email):
                     return self._api_account(r, ctx), False
             raise apiserver.ApiError(404, "account not found")
         if path == "/api/accounts":
-            return self._api_accounts(p, ctx)
+            return self._api_accounts(p, ctx, cipher)
         raise apiserver.ApiError(404, "unknown endpoint, see /api")
 
     def _api_context(self):
@@ -1655,8 +1738,8 @@ class Api:
                 acc_fams.setdefault(m["account_id"], []).append({"name": fams[m["family_id"]], "role": m["role"]})
         return {"sheets": sheets, "cols": cols, "groups": groups, "acc_groups": acc_groups, "acc_fams": acc_fams}
 
-    def _api_rows(self):
-        return [self._decrypt_row(r) for r in self._store.query("SELECT * FROM accounts ORDER BY sheet_id, id")]
+    def _api_rows(self, cipher):
+        return [self._decrypt_row(r, cipher) for r in self._store.query("SELECT * FROM accounts ORDER BY sheet_id, id")]
 
     def _api_account(self, r, ctx):
         secret = r["totp_secret"]
@@ -1682,8 +1765,8 @@ class Api:
             out["totp_error"] = "invalid secret"
         return out
 
-    def _api_accounts(self, p, ctx):
-        rows = self._api_rows()
+    def _api_accounts(self, p, ctx, cipher):
+        rows = self._api_rows(cipher)
         lower = lambda v: str(v or "").strip().lower()  # noqa: E731
         many = lambda v: [x.strip() for x in str(v or "").split(",") if x.strip()]  # noqa: E731
         if p.get("sheet"):

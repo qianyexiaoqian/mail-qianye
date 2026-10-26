@@ -9,6 +9,7 @@
 <script src="i18n.js"></script>
 <script src="countries.js"></script>
 <script src="importer.js"></script>
+<script src="apidocs.js"></script>
 <script src="agent.js"></script>
 </head>
 <body>
@@ -103,6 +104,7 @@
       </ul>
     </template>
 
+    <button v-if="!selfmail" class="side-btn side-wide" @click="openApiPage()" :title="t('api.hint')">🔌 {{ t('api.page') }}</button>
     <button v-if="!selfmail" class="side-btn side-wide" @click="openSelfmailWindow" :title="t('selfmail.openTip')">📬 {{ t('selfmail.title') }}</button>
     <div class="side-actions">
       <button class="side-btn" @click="lockNow" :title="t('lock.lockTip')">🔒 {{ t('lock.lock') }}</button>
@@ -928,6 +930,128 @@
     </div>
   </div>
 
+  <!-- ========== API 接口 ========== -->
+  <div v-if="apiPage" class="modal-mask" @mousedown.self="apiPage = null">
+    <div class="modal api-modal">
+      <div class="api-modal-head"><h3>🔌 {{ t('api.page') }}</h3><span class="spacer"></span><button class="icon-btn" @click="apiPage = null">✕</button></div>
+
+      <div class="api-card">
+        <div class="api-row">
+          <span class="api-label">{{ t('api.address') }}</span>
+          <div class="api-input"><input readonly class="mono" :value="apiBase"><button @click="copy(apiBase, t('api.address'))">{{ t('api.copy') }}</button></div>
+          <span class="api-pill" :class="apiPage.cfg.status.running ? 'on' : apiPage.cfg.status.error ? 'err' : 'off'">
+            {{ apiPage.cfg.status.running ? '● ' + t('api.on') : apiPage.cfg.status.error ? '● ' + t('api.error') : '○ ' + t('api.off') }}</span>
+          <label class="switch" :title="t('api.enable')"><input type="checkbox" :checked="apiPage.cfg.enabled" :disabled="apiPage.busy"
+            @change="apiSet({enabled: $event.target.checked})"><span></span></label>
+        </div>
+        <div v-if="apiPage.cfg.status.error" class="danger-text mail-hint api-indent">{{ t('api.failed', {s: apiPage.cfg.status.error}) }}</div>
+        <div class="api-row">
+          <span class="api-label">{{ t('api.key') }}</span>
+          <div class="api-input wide">
+            <input readonly class="mono" :value="apiPage.cfg.token ? (apiPage.show ? apiPage.cfg.token : '•'.repeat(40)) : ''" :placeholder="t('api.noToken')">
+            <button v-if="apiPage.cfg.token" :title="t('api.show')" @click="apiPage.show = !apiPage.show">{{ apiPage.show ? '◉' : '◎' }}</button>
+            <button :disabled="!apiPage.cfg.token" @click="copy(apiPage.cfg.token, t('api.key'), true)">{{ t('api.copyKey') }}</button>
+            <button :title="apiPage.cfg.token ? t('api.regen') : t('api.gen')" @click="apiRegen">⟳</button>
+          </div>
+        </div>
+        <div class="api-row api-opts">
+          <span class="api-label">{{ t('api.port') }}</span>
+          <input class="api-port" type="number" min="1" max="65535" v-model.number="apiPage.port" :disabled="apiPage.busy"
+                 @change="apiPage.port !== apiPage.cfg.port && apiSet({port: apiPage.port})">
+          <label class="check"><input type="checkbox" :checked="apiPage.cfg.allow_locked" :disabled="apiPage.busy" @change="apiSet({allow_locked: $event.target.checked})"> {{ t('api.allowLocked') }}</label>
+          <label class="check"><input type="checkbox" :checked="apiPage.cfg.lan" :disabled="apiPage.busy" @change="apiSet({lan: $event.target.checked})"> {{ t('api.lan') }}</label>
+        </div>
+        <div class="muted mail-hint api-indent">{{ t('api.pageHint') }}</div>
+        <div v-if="apiPage.cfg.lan" class="danger-text mail-hint api-indent">{{ t('api.lanWarn') }}</div>
+      </div>
+
+      <div class="api-card api-docs-card">
+        <div class="api-docs-head">
+          <button class="link api-docs-title" @click="apiPage.sel = null; apiPage.view = 'docs'">📄 {{ t('api.docs') }}</button>
+          <span class="spacer"></span>
+          <button class="link" @click="apiPage.view = apiPage.view === 'log' ? 'docs' : 'log'; apiRefresh()">{{ t('api.log', {n: apiPage.cfg.log.length}) }}</button>
+        </div>
+
+        <template v-if="apiPage.view === 'log'">
+          <div class="editor-row"><button class="link" @click="apiPage.view = 'docs'">← {{ t('apidoc.back') }}</button><span class="spacer"></span>
+            <button class="btn sm" @click="apiRefresh">⟳ {{ t('api.refresh') }}</button></div>
+          <table v-if="apiPage.cfg.log.length" class="api-table api-log">
+            <tr v-for="(l, i) in apiPage.cfg.log" :key="i"><td class="muted">{{ l.time }}</td><td>{{ l.ip }}</td><td class="mono ellipsis" :title="l.path">{{ l.path }}</td>
+              <td :class="l.status === 200 ? 'ok-text' : 'danger-text'">{{ l.status }}</td></tr>
+          </table>
+          <div v-else class="muted mail-hint">{{ t('api.noLog') }}</div>
+        </template>
+
+        <div v-else-if="!apiDoc" class="api-cats">
+          <div v-for="cat in apiDocCats" :key="cat" class="api-cat">
+            <div class="api-cat-title">{{ t('apidoc.cat.' + cat) }}</div>
+            <div v-for="d in apiDocs.filter(x => x.cat === cat)" :key="d.id" class="api-doc-card" @click="apiOpenDoc(d)">
+              <div class="api-doc-title">{{ t('apidoc.' + d.id + '.title') }}</div>
+              <template v-if="d.path">
+                <div class="api-doc-line"><b>path</b> : <span class="api-path">{{ d.path }}</span></div>
+                <div class="api-doc-line"><b>method</b> : GET</div>
+              </template>
+              <div v-else class="api-doc-line muted">{{ t('apidoc.auth.short') }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="api-detail">
+          <button class="link" @click="apiPage.sel = null">← {{ t('apidoc.back') }}</button>
+          <h4>{{ t('apidoc.' + apiDoc.id + '.title') }}</h4>
+          <p class="api-desc">{{ t('apidoc.' + apiDoc.id + '.desc') }}</p>
+
+          <template v-if="apiDoc.path">
+            <div class="api-endpoint"><span class="api-method">GET</span><code class="mono">{{ apiBase + apiDoc.path }}</code>
+              <button class="btn sm" @click="copy(apiBase + apiDoc.path)">{{ t('api.copy') }}</button></div>
+
+            <div v-if="apiDoc.params.length" class="api-sub">{{ t('apidoc.params') }}</div>
+            <table v-if="apiDoc.params.length" class="api-table api-params">
+              <tr><th>{{ t('apidoc.name') }}</th><th>{{ t('apidoc.req') }}</th><th>{{ t('apidoc.desc') }}</th></tr>
+              <tr v-for="[name, req] in apiDoc.params" :key="name"><td class="mono">{{ name }}</td><td :class="{'danger-text': req === 'yes'}">{{ apiReq(req) }}</td>
+                <td>{{ t('apidoc.p.' + name) }}</td></tr>
+            </table>
+
+            <div class="api-sub">{{ t('apidoc.try') }}</div>
+            <div class="api-try">
+              <label v-for="[name] in apiDoc.params" :key="name"><span class="mono">{{ name }}</span><input v-model="apiPage.tryParams[name]" @keydown.enter="apiTry"></label>
+              <div class="editor-row">
+                <button class="btn primary sm" :disabled="apiPage.trying || !apiPage.cfg.status.running" @click="apiTry">{{ apiPage.trying ? t('apidoc.sending') : '▶ ' + t('apidoc.send') }}</button>
+                <span v-if="!apiPage.cfg.status.running" class="muted">{{ t('apidoc.needRunning') }}</span>
+                <template v-if="apiPage.tryResult">
+                  <span class="api-pill" :class="apiPage.tryResult.status === 200 ? 'on' : 'err'">{{ apiPage.tryResult.status || '—' }}</span>
+                  <span class="muted">{{ apiPage.tryResult.ms }} ms</span>
+                </template>
+              </div>
+              <pre v-if="apiPage.tryResult" class="api-code api-result">{{ apiPage.tryResult.body || '(empty)' }}</pre>
+            </div>
+
+            <div class="api-sub">{{ t('apidoc.examples') }}</div>
+            <div v-for="ex in apiExamples" :key="ex.label" class="api-example">
+              <span class="api-ex-label">{{ ex.label }}</span>
+              <pre class="api-code">{{ ex.code }}</pre>
+              <button class="btn sm" :title="t('apidoc.copyWithKey')" @click="apiCopyCode(ex.code)">{{ t('api.copy') }}</button>
+            </div>
+
+            <div class="api-sub">{{ t('apidoc.response') }}</div>
+            <pre class="api-code">{{ apiDoc.responseText || apiJson(apiDoc.response) }}</pre>
+          </template>
+
+          <template v-else>
+            <div class="api-sub">{{ t('apidoc.auth.how') }}</div>
+            <pre class="api-code">Authorization: Bearer &lt;API_KEY&gt;
+X-API-Token: &lt;API_KEY&gt;
+{{ apiBase }}/api/accounts?token=&lt;API_KEY&gt;</pre>
+            <div class="api-sub">{{ t('apidoc.auth.codes') }}</div>
+            <table class="api-table api-params">
+              <tr v-for="c in apiStatusCodes" :key="c"><td class="mono">{{ c }}</td><td>{{ t('apidoc.code.' + c) }}</td></tr>
+            </table>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ========== 家庭組管理 ========== -->
   <div v-if="famEdit" class="modal-mask" @mousedown.self="famEdit = null">
     <div class="modal wide fam-modal">
@@ -1109,48 +1233,14 @@
       </div>
 
       <div class="section-title">{{ t('api.section') }}</div>
-      <div v-if="settings.api" class="form-grid">
-        <div class="full muted mail-hint">{{ t('api.hint') }}</div>
-        <label class="full check"><input type="checkbox" v-model="settings.api.enabled"> {{ t('api.enable') }}</label>
-        <label>{{ t('api.port') }}<input v-model.number="settings.api.port" type="number" min="1" max="65535"></label>
-        <label class="check"><input type="checkbox" v-model="settings.api.lan"> {{ t('api.lan') }}</label>
-        <div v-if="settings.api.lan" class="full danger-text mail-hint">{{ t('api.lanWarn') }}</div>
-        <div class="full field">Token
-          <div class="editor-row api-token">
-            <input readonly class="mono" :value="settings.api.token ? (settings.apiShow ? settings.api.token : '•'.repeat(32)) : ''" :placeholder="t('api.noToken')">
-            <button v-if="settings.api.token" class="icon-btn" :title="t('api.show')" @click="settings.apiShow = !settings.apiShow">{{ settings.apiShow ? '◉' : '◎' }}</button>
-            <button class="btn sm" :disabled="!settings.api.token" @click="copy(settings.api.token, 'Token', true)">{{ t('api.copy') }}</button>
-            <button class="btn sm" @click="regenApiToken">{{ settings.api.token ? t('api.regen') : t('api.gen') }}</button>
-          </div>
-          <span class="muted">{{ t('api.tokenHint') }}</span>
-        </div>
-        <div class="full api-status">
-          <span v-if="settings.api.status.running" class="ok-text">● {{ t('api.running', {s: settings.api.status.url}) }}</span>
-          <span v-else-if="settings.api.status.error" class="danger-text">● {{ t('api.failed', {s: settings.api.status.error}) }}</span>
+      <div class="form-grid one">
+        <div class="editor-row">
+          <span v-if="settings.apiStatus && settings.apiStatus.running" class="ok-text">● {{ t('api.running', {s: settings.apiStatus.url}) }}</span>
+          <span v-else-if="settings.apiStatus && settings.apiStatus.error" class="danger-text">● {{ t('api.failed', {s: settings.apiStatus.error}) }}</span>
           <span v-else class="muted">○ {{ t('api.stopped') }}</span>
-          <span v-if="apiDirty" class="muted">　{{ t('api.saveToApply') }}</span>
+          <span class="spacer"></span>
+          <button class="btn sm" @click="openApiPage()">🔌 {{ t('api.open') }}</button>
         </div>
-        <details class="full api-docs">
-          <summary>{{ t('api.docs') }}</summary>
-          <div class="muted mail-hint">{{ t('api.authHint') }}</div>
-          <table class="api-table">
-            <tr v-for="ep in apiEndpoints" :key="ep.path"><td class="mono">GET {{ ep.path }}</td><td>{{ ep.desc }}</td></tr>
-          </table>
-          <div class="muted mail-hint">{{ t('api.fieldsHint') }}</div>
-          <div v-for="ex in apiExamples" :key="ex" class="api-example">
-            <code class="mono">{{ ex }}</code>
-            <button class="btn sm" :disabled="!settings.api.token" @click="copy(ex.replace('<TOKEN>', settings.api.token), t('api.example'), true)">{{ t('api.copy') }}</button>
-          </div>
-        </details>
-        <details class="full api-docs">
-          <summary>{{ t('api.log', {n: settings.api.log.length}) }}</summary>
-          <div class="editor-row"><span class="spacer"></span><button class="btn sm" @click="refreshApiStatus">⟳ {{ t('api.refresh') }}</button></div>
-          <table v-if="settings.api.log.length" class="api-table api-log">
-            <tr v-for="(l, i) in settings.api.log" :key="i"><td class="muted">{{ l.time }}</td><td>{{ l.ip }}</td><td class="mono ellipsis">{{ l.path }}</td>
-              <td :class="l.status === 200 ? 'ok-text' : 'danger-text'">{{ l.status }}</td></tr>
-          </table>
-          <div v-else class="muted mail-hint">{{ t('api.noLog') }}</div>
-        </details>
       </div>
 
       <div class="section-title">{{ t('settings.changePw') }}</div>

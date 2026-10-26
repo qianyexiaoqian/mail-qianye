@@ -2,7 +2,7 @@
 
 默認關閉，在「設置 → API 接口」裡打開。每個請求都要帶 Token：
   Authorization: Bearer <token>   或   X-API-Token: <token>   或   ?token=<token>
-軟件鎖定時返回 423（數據是加密的，解鎖後才能讀）。默認只監聽 127.0.0.1。
+軟件鎖定時：打開了「鎖定時也能讀取」（默認打開）就照常返回，否則返回 423。默認只監聽 127.0.0.1。
 """
 
 import hashlib
@@ -117,20 +117,21 @@ class ApiServer:
         if not token or not want or not hmac.compare_digest(token_hash(token), want):
             time.sleep(0.3)  # 減慢猜測
             raise ApiError(401, "invalid or missing token")
+        return token
 
     def _serve(self, req):
         url = urlparse(req.path)
         query = parse_qs(url.query, keep_blank_values=True)
         path, text = url.path.rstrip("/") or "/", False
         try:
-            self._check_token(req, query)
+            token = self._check_token(req, query)
             params = {k: v[-1] for k, v in query.items() if k != "token"}
-            body, text = self.provider._api_handle(path, params)
+            body, text = self.provider._api_handle(path, params, token)
             status = 200
         except ApiError as e:
             status, body = e.status, {"error": str(e)}
         except PermissionError:
-            status, body = 423, {"error": "locked: unlock the app to read data"}
+            status, body = 423, {"error": "locked: unlock the app, or turn on \"readable while locked\" in the API settings"}
         except Exception as e:  # noqa: BLE001
             status, body = 500, {"error": f"{type(e).__name__}: {e}"}
         shown_q = urlencode({k: v[-1] for k, v in query.items() if k != "token"})  # 記錄裡不保存 Token

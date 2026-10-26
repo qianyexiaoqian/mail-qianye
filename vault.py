@@ -42,6 +42,7 @@ def derive_key(password, salt_b64, n=SCRYPT_N):
 
 class Cipher:
     def __init__(self, key):
+        self.key = key
         self._aes = AESGCM(key)
 
     def encrypt(self, text):

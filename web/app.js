@@ -174,7 +174,8 @@ const app = createApp({
       showPwd: false,
       page: 1, pageSize: 20,
       codes: {}, now: Math.floor(Date.now() / 1000), lastWindow: 0,
-      edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null,
+      edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null, apiPage: null,
+      apiDocs: API_DOCS, apiDocCats: API_DOC_CATS, apiStatusCodes: API_STATUS_CODES,
       familyKinds: FAMILY_KINDS,
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
@@ -334,24 +335,23 @@ const app = createApp({
       const msg = this.inbox?.messages.find(m => m.codes.length);
       return msg ? { msg, code: msg.codes[0] } : null;
     },
-    apiDirty() {
-      const a = this.settings?.api, b = this.settings?.apiSaved;
-      return !!(a && b && (a.enabled !== b.enabled || a.port !== b.port || a.lan !== b.lan));
+    // ---------- API 接口頁面 ----------
+    apiBase() {
+      const c = this.apiPage?.cfg;
+      if (!c) return '';
+      return c.status.running ? c.status.url : `http://127.0.0.1:${c.port}`;
     },
-    apiEndpoints() {
-      return ['/api/accounts', '/api/account', '/api/2fa', '/api/groups', '/api/sheets', '/api/families', '/api/health']
-        .map(path => ({ path, desc: t('api.ep.' + path.slice(5)) }));
-    },
+    apiDoc() { return API_DOCS.find(d => d.id === this.apiPage?.sel) || null; },
     apiExamples() {
-      const a = this.settings?.api;
-      if (!a) return [];
-      const base = a.status.running ? a.status.url : `http://127.0.0.1:${a.port}`;
+      const d = this.apiDoc;
+      if (!d || !d.path) return [];
+      const q = new URLSearchParams(Object.entries(d.query || {})).toString();
+      const url = this.apiBase + d.path + (q ? '?' + q : '');
+      const py = Object.keys(d.query || {}).length ? `, params=${JSON.stringify(d.query)}` : '';
       return [
-        `curl -H "Authorization: Bearer <TOKEN>" "${base}/api/accounts?group=yutoux"`,
-        `${base}/api/accounts?format=txt&fields=email,password,totp_code&token=<TOKEN>`,
-        `${base}/api/account?email=user@gmail.com&token=<TOKEN>`,
-        `${base}/api/2fa?email=user@gmail.com&token=<TOKEN>`,
-        `${base}/api/groups?token=<TOKEN>`,
+        { label: 'curl', code: `curl -H "Authorization: Bearer <API_KEY>" "${url}"` },
+        { label: 'URL', code: url + (q ? '&' : '?') + 'token=<API_KEY>' },
+        { label: 'Python', code: `import requests\nr = requests.get("${this.apiBase + d.path}"${py},\n                 headers={"Authorization": "Bearer <API_KEY>"})\nprint(r.${d.responseText ? 'text' : 'json()'})` },
       ];
     },
     exportScope() {
@@ -475,29 +475,64 @@ const app = createApp({
       if (!this.settings) return;
       this.settings.mail = { ...mail, admin_password: '' };
       this.settings.ai = { ...ai, api_key: '' };
-      this.settings.api = api;
-      this.settings.apiSaved = { enabled: api.enabled, port: api.port, lan: api.lan };
-      this.settings.apiShow = false;
+      this.settings.apiStatus = api.status;
     },
     aiConfigPayload() {
       const { has_api_key, default_prompt, ...cfg } = this.settings.ai;
       cfg.api_key = cfg.api_key ? cfg.api_key : (has_api_key ? null : '');  // 留空 = 保持原 Key
       return cfg;
     },
-    // ---------- 本地 API ----------
-    async regenApiToken() {
-      const api = this.settings.api;
-      if (api.token && !(await this.confirm(t('api.regen'), t('api.regenConfirm'), t('api.regen')))) return;
-      const r = await call('api_regen_token');
-      if (!this.settings) return;
-      api.token = r.token;
-      this.settings.apiShow = true;
+    // ---------- 本地 API 頁面：開關、端口、密鑰、接口文檔、在線調試 ----------
+    async openApiPage(docId = null) {
+      this.settings = null;
+      const cfg = await call('get_api_config');
+      this.apiPage = { cfg, port: cfg.port, show: false, sel: docId, view: 'docs', tryParams: {}, tryResult: null, trying: false, busy: false };
+      if (docId) this.apiOpenDoc(API_DOCS.find(d => d.id === docId));
+    },
+    // 開關、端口、局域網、鎖定時可讀：改了立即生效
+    async apiSet(patch) {
+      const page = this.apiPage, c = page.cfg;
+      const hadToken = !!c.token;
+      page.busy = true;
+      try {
+        const r = await call('set_api_config', { enabled: c.enabled, port: c.port, lan: c.lan, allow_locked: c.allow_locked, ...patch });
+        page.cfg = r;
+        page.port = r.port;
+        if (r.enabled && !r.status.running) this.toast(t('api.failed', { s: r.status.error }), 'error');
+        else if (r.enabled && !hadToken) { page.show = true; this.toast(t('api.firstToken')); }
+        else if ('enabled' in patch) this.toast(r.enabled ? t('api.running', { s: r.status.url }) : t('api.turnedOff'));
+      } catch (e) {
+        page.port = c.port;
+        this.toast(errText(e), 'error');
+      }
+      page.busy = false;
+    },
+    async apiRegen() {
+      const page = this.apiPage;
+      if (page.cfg.token && !(await this.confirm(t('api.regen'), t('api.regenConfirm'), t('api.regen')))) return;
+      page.cfg = await call('api_regen_token');
+      page.show = true;
       this.toast(t('api.regenDone'));
     },
-    async refreshApiStatus() {
+    async apiRefresh() {
       const r = await call('api_status');
-      if (this.settings?.api) Object.assign(this.settings.api, r);
+      if (this.apiPage) Object.assign(this.apiPage.cfg, r);
     },
+    apiOpenDoc(d) {
+      if (!d) return;
+      Object.assign(this.apiPage, { sel: d.id, view: 'docs', tryParams: { ...(d.query || {}) }, tryResult: null });
+    },
+    async apiTry() {
+      const page = this.apiPage, d = this.apiDoc;
+      page.trying = true;
+      try { page.tryResult = await call('api_try', d.path, { ...page.tryParams }); }
+      catch (e) { page.tryResult = { status: 0, ms: 0, body: errText(e), error: true }; }
+      page.trying = false;
+      this.apiRefresh();
+    },
+    apiCopyCode(code) { this.copy(code.replaceAll('<API_KEY>', this.apiPage.cfg.token || '<API_KEY>'), t('api.example'), true); },
+    apiJson(v) { return JSON.stringify(v, null, 2); },
+    apiReq(kind) { return kind === 'yes' ? t('apidoc.required') : kind === 'one' ? t('apidoc.oneOf') : t('apidoc.optional'); },
     applyAiPreset(p) { Object.assign(this.settings.ai, { base_url: p.base_url, model: p.model }); },
     async testAi() {
       const s = this.settings;
@@ -541,22 +576,6 @@ const app = createApp({
         catch (e) { s.busy = false; return (s.err = errText(e)); }
         Object.assign(s, { old: '', pw: '', pw2: '', busy: false });
         this.toast(t('settings.pwChanged'));
-      }
-      // API 放在最後：啟動失敗、或者第一次打開剛生成了 Token 時，留在設置裡（其他設置已經保存）
-      if (s.api && this.apiDirty) {
-        const { enabled, port, lan } = s.api;
-        const hadToken = !!s.api.token;
-        let r;
-        try { r = await call('set_api_config', { enabled, port, lan }); }
-        catch (e) { return (s.err = errText(e)); }
-        Object.assign(s.api, r);
-        s.apiSaved = { enabled: r.enabled, port: r.port, lan: r.lan };
-        if (r.enabled && !r.status.running) return (s.err = t('api.failed', { s: r.status.error }));  // 端口被佔用等
-        if (r.enabled && !hadToken) {
-          s.apiShow = true;
-          return this.toast(t('api.firstToken'));
-        }
-        this.toast(r.enabled ? t('api.running', { s: r.status.url }) : t('api.turnedOff'));
       }
       this.settings = null;
     },
@@ -1567,6 +1586,7 @@ const app = createApp({
       if (e.key === 'Escape') {
         if (this.dialog) this.dialog.resolve(null);
         else if (this.pop) this.pop = null;
+        else if (this.apiPage) this.apiPage = null;
         else if (this.inbox) this.closeInbox();
         else if (this.bulkCol) this.bulkCol = null;
         else if (this.edit) this.edit = null;
