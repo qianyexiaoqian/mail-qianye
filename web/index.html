@@ -108,6 +108,7 @@
     <button v-if="!selfmail" class="side-btn side-wide" @click="openSelfmailWindow" :title="t('selfmail.openTip')">📬 {{ t('selfmail.title') }}</button>
     <div class="side-actions">
       <button class="side-btn" @click="lockNow" :title="t('lock.lockTip')">🔒 {{ t('lock.lock') }}</button>
+      <button class="side-btn" @click="openHistory()" :title="t('hist.tip')">🕘 {{ t('hist.short') }}</button>
       <button class="side-btn" @click="openSettings">⚙ {{ t('settings.title') }}</button>
     </div>
     <div class="side-foot" :title="meta.db_path">{{ t('side.dataFile') }}：{{ dbName }}</div>
@@ -643,6 +644,7 @@
       </div>
       <div class="modal-foot">
         <span class="muted" v-if="edit.id">{{ t('edit.meta', {c: fmtDate(edit.created_at), u: fmtDate(edit.updated_at)}) }}</span>
+        <button v-if="edit.id" class="link" @click="openHistory(edit.email)">🕘 {{ t('hist.ofThis') }}</button>
         <span class="spacer"></span>
         <button class="btn" @click="edit = null">{{ t('btn.cancel') }}</button>
         <button class="btn primary" @click="saveEdit">{{ t('btn.saveShortcut') }}</button>
@@ -926,6 +928,71 @@
         <span class="muted">{{ t('group.hint') }}</span><span class="spacer"></span>
         <button class="btn" @click="groupEdit = null">{{ t('btn.cancel') }}</button>
         <button class="btn primary" @click="saveGroups">{{ t('btn.save') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 操作記錄 ========== -->
+  <div v-if="histPage" class="modal-mask" @mousedown.self="histPage = null">
+    <div class="modal hist-modal">
+      <div class="api-modal-head">
+        <h3>🕘 {{ t('hist.title') }}</h3>
+        <span class="muted hist-count" v-if="histPage.data">{{ t('hist.count', {n: histPage.data.all, max: histPage.data.max}) }}</span>
+        <span class="spacer"></span><button class="icon-btn" @click="histPage = null">✕</button>
+      </div>
+      <div class="hist-filters">
+        <input v-model="histPage.q.search" class="hist-search" :placeholder="t('hist.searchPh')" @input="histSearchSoon">
+        <select v-model="histPage.q.actor" @change="loadHistory(true)">
+          <option value="">{{ t('hist.allActors') }}</option>
+          <option value="user">{{ t('hist.actor.user') }}</option><option value="agent">{{ t('hist.actor.agent') }}</option>
+          <option value="sync">{{ t('hist.actor.sync') }}</option>
+        </select>
+        <select v-model="histPage.q.field" @change="loadHistory(true)">
+          <option value="">{{ t('hist.allFields') }}</option>
+          <option v-for="f in ['password', 'totp_secret', 'backup_codes', 'recovery_email', 'recovery_password', 'email', 'phone', 'notes', 'status', 'oauth_client_id', 'oauth_token']"
+                  :key="f" :value="f">{{ t('hist.f.' + f) }}</option>
+          <option value="delete">{{ t('hist.deleted') }}</option><option value="restore">{{ t('hist.restored') }}</option>
+          <option value="security">{{ t('hist.security') }}</option>
+        </select>
+        <label class="hist-date">{{ t('hist.from') }}<input type="date" v-model="histPage.q.from" @change="loadHistory(true)"></label>
+        <label class="hist-date">{{ t('hist.to') }}<input type="date" v-model="histPage.q.to" @change="loadHistory(true)"></label>
+        <label class="check"><input type="checkbox" v-model="histPage.show"> {{ t('hist.showSecrets') }}</label>
+        <button class="link" @click="histReset">{{ t('filter.clear') }}</button>
+      </div>
+      <div v-if="histPage.q.email" class="hist-chip-row">
+        <span class="chip">{{ t('hist.onlyEmail', {s: histPage.q.email}) }} <button class="icon-btn sm" @click="histPage.q.email = ''; loadHistory(true)">✕</button></span>
+      </div>
+      <div class="hist-table-wrap">
+        <table class="hist-table">
+          <thead><tr><th class="hist-time">{{ t('hist.time') }}</th><th class="hist-actor">{{ t('hist.actor') }}</th><th class="hist-email">{{ t('col.email') }}</th>
+            <th class="hist-field">{{ t('hist.field') }}</th><th>{{ t('hist.before') }}</th><th class="hist-arrow"></th><th>{{ t('hist.after') }}</th></tr></thead>
+          <tbody>
+            <tr v-for="it in (histPage.data && histPage.data.items) || []" :key="it.id" :class="'hist-' + it.action">
+              <td class="hist-time mono">{{ histTime(it.ts) }}</td>
+              <td class="hist-actor"><span class="hist-badge" :class="it.actor">{{ t('hist.actor.' + it.actor) }}</span></td>
+              <td class="hist-email">
+                <span v-if="it.email" class="copy mono ellipsis" :title="it.email + (it.sheet ? ' · ' + it.sheet : '')"
+                      @click="histPage.q.email = it.email; loadHistory(true)">{{ it.email }}</span>
+                <span v-else class="muted">—</span>
+              </td>
+              <td class="hist-field"><span :class="{'danger-text': it.action === 'delete'}">{{ histFieldLabel(it) }}</span>
+                <span v-if="it.action === 'restore'" class="hist-tag">{{ t('hist.restoredTag') }}</span></td>
+              <td class="hist-val" :title="t('hist.clickCopy')" @click="histCopy(it, 'before')"><span class="hist-old">{{ histShow(it, 'before') }}</span>
+                <span v-if="!it.before && it.action !== 'security'" class="muted">∅</span></td>
+              <td class="hist-arrow muted">→</td>
+              <td class="hist-val" :title="t('hist.clickCopy')" @click="histCopy(it, 'after')"><span class="hist-new">{{ histShow(it, 'after') }}</span>
+                <span v-if="!it.after && it.action !== 'security'" class="muted">∅</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="histPage.data && !histPage.data.items.length" class="empty">{{ histPage.data.all ? t('hist.noMatch') : t('hist.empty') }}</div>
+      </div>
+      <div class="modal-foot" v-if="histPage.data">
+        <span class="muted">{{ histPage.data.total ? t('pager.info', {from: histPage.offset + 1, to: Math.min(histPage.data.total, histPage.offset + histPage.limit), total: histPage.data.total}) : '' }}</span>
+        <span class="spacer"></span>
+        <span v-if="histPage.loading" class="muted">…</span>
+        <button class="page-btn" :disabled="histPage.offset <= 0" @click="histPageTo(-1)">‹ {{ t('pager.prev') }}</button>
+        <button class="page-btn" :disabled="histPage.offset + histPage.limit >= histPage.data.total" @click="histPageTo(1)">{{ t('pager.next') }} ›</button>
       </div>
     </div>
   </div>

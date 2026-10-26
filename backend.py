@@ -38,7 +38,11 @@ import vault
 STATUSES = ["正常", "待驗證", "異常", "封禁", "停用"]
 FIELDS = ["email", "password", "totp_secret", "backup_codes", "recovery_email", "recovery_password",
           "oauth_client_id", "oauth_token", "phone", "notes"]
+# 操作記錄：只記敏感改動（這些字段的變更前 → 變更後、刪除郵箱、主密碼和 API 密鑰），最多 AUDIT_MAX 條，超出刪最早的
+AUDIT_MAX = 9999
+_ACTOR = threading.local()  # 當前調用的操作人：前端用 call_as 標明（AI 助手 = agent），默認 user
 SECRET_FIELDS = ("password", "totp_secret", "backup_codes", "recovery_password", "oauth_token")  # 加密存儲的字段
+AUDIT_FIELDS = FIELDS + ["status"]  # 這些字段變了會記進操作記錄
 # backup_codes：一次性備用碼（例如 Google 的 10 個），一行一個，已用過的前面加「~」
 # 微軟 OAuth2（帶令牌）的輔助郵箱：oauth_client_id = 應用 ClientID，oauth_token = refresh token
 
@@ -120,6 +124,19 @@ CREATE TABLE IF NOT EXISTS chats (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chats_mode ON chats(mode, updated_at);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'user',
+    action TEXT NOT NULL,
+    account_id INTEGER,
+    email TEXT NOT NULL DEFAULT '',
+    sheet TEXT NOT NULL DEFAULT '',
+    field TEXT NOT NULL DEFAULT '',
+    before TEXT NOT NULL DEFAULT '',
+    after TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -306,6 +323,7 @@ class Api:
         old = self._cipher
         self.unlock(old_password)  # 校驗舊密碼
         self._rekey(old, new_password)
+        self._audit_security("master_password")
 
     def _rekey(self, old, password):
         """用新主密碼重新加密所有敏感字段，在一個事務裡完成。old 為 None 表示現有數據是明文。"""
@@ -344,8 +362,13 @@ class Api:
             for r in conn.execute("SELECT id, title, data FROM chats").fetchall():
                 plain = [old.decrypt(r[f]) if old else r[f] for f in ("title", "data")]
                 chats.append([cipher.encrypt(v) for v in plain] + [r["id"]])
+            audits = []
+            for r in conn.execute("SELECT id, before, after FROM audit_log").fetchall():
+                plain = [old.decrypt(r[f]) if old else r[f] for f in ("before", "after")]
+                audits.append([cipher.encrypt(v) for v in plain] + [r["id"]])
             try:
                 conn.executemany("UPDATE chats SET title=?, data=? WHERE id=?", chats)
+                conn.executemany("UPDATE audit_log SET before=?, after=? WHERE id=?", audits)
                 conn.executemany(f"UPDATE accounts SET {sets} WHERE id=?", updates)
                 conn.executemany("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", list(settings.items()))
                 conn.commit()
@@ -447,10 +470,12 @@ class Api:
     def delete_sheet(self, sheet_id):
         if len(self._store.query("SELECT id FROM sheets")) <= 1:
             raise ValueError("err.keep_one_sheet")
+        gone = self._audit_snapshot([r["id"] for r in self._store.query("SELECT id FROM accounts WHERE sheet_id=?", (sheet_id,))])
         self._store.execute("DELETE FROM account_groups WHERE account_id IN (SELECT id FROM accounts WHERE sheet_id=?)", (sheet_id,))
         self._store.execute("DELETE FROM family_members WHERE account_id IN (SELECT id FROM accounts WHERE sheet_id=?)", (sheet_id,))
         self._store.execute("DELETE FROM accounts WHERE sheet_id=?", (sheet_id,))
         self._store.execute("DELETE FROM sheets WHERE id=?", (sheet_id,))
+        self._audit_deleted(gone)
 
     # ---------- 分組 ----------
     @need_unlock
@@ -697,12 +722,14 @@ class Api:
         if data.get("id"):
             self._selfmail_check_updates([(data["id"], {"email": data.get("email"), "password": data.get("password") or ""})])
             self._selfmail_status([data["id"]], status)
+            before = self._audit_snapshot([data["id"]])
             sets = ", ".join(f"{f}=?" for f in FIELDS)
             self._store.execute(
                 f"UPDATE accounts SET {sets}, status=?, group_id=?, extra=?, updated_at=? WHERE id=?",
                 [values[f] for f in FIELDS] + [status, group_id, extra, now, data["id"]],
             )
             self._change_groups([data["id"]], "set", gids)
+            self._audit_diff(before)
             return data["id"]
         cols = ", ".join(FIELDS)
         marks = ", ".join("?" for _ in FIELDS)
@@ -719,9 +746,11 @@ class Api:
         rows = self._selfmail_ids(ids)
         if rows:  # 自建郵箱：先在後台刪除，成功了再刪本地
             self._admin_client(self._admin_cfg()).delete_mailboxes([r["email"] for r in rows.values()])
+        gone = self._audit_snapshot(ids)
         self._bulk("DELETE FROM account_groups WHERE account_id IN ({})", ids)
         self._bulk("DELETE FROM family_members WHERE account_id IN ({})", ids)
         self._bulk("DELETE FROM accounts WHERE id IN ({})", ids)
+        self._audit_deleted(gone)
 
     @need_unlock
     def set_group(self, ids, group_id):
@@ -730,7 +759,9 @@ class Api:
     @need_unlock
     def set_status(self, ids, status):
         self._selfmail_status(ids, status)
+        before = self._audit_snapshot(ids)
         self._bulk("UPDATE accounts SET status=? WHERE id IN ({})", ids, [status])
+        self._audit_diff(before)
 
     @need_unlock
     def move_accounts(self, ids, sheet_id):
@@ -741,6 +772,7 @@ class Api:
         """批量改字段：updates = [{"id": 1, "fields": {"notes": "...", "phone": "..."}}]，只改給出的字段。"""
         now = int(time.time())
         self._selfmail_check_updates([(u["id"], u.get("fields") or {}) for u in updates or []])
+        before = self._audit_snapshot([u["id"] for u in updates or []])
         st = self._store
         with st.lock:
             for u in updates or []:
@@ -757,6 +789,7 @@ class Api:
                 sets = ", ".join(f"{k}=?" for k in fields)
                 st.conn.execute(f"UPDATE accounts SET {sets}, updated_at=? WHERE id=?", [*fields.values(), now, int(u["id"])])
             st.conn.commit()
+        self._audit_diff(before)
 
     @need_unlock
     def set_extra(self, ids, key, value):
@@ -954,6 +987,7 @@ class Api:
         if not ids:
             return {"created": [], "skipped": 0, "failed": []}
         rows = self._store.query(f"SELECT * FROM accounts WHERE id IN ({','.join('?' for _ in ids)})", ids)
+        before = self._audit_snapshot(ids)
         created, failed, skipped = [], [], 0
         self._set_progress(progress_id, total=len(rows), done=0)
         for i, r in enumerate(rows):
@@ -973,6 +1007,7 @@ class Api:
             )
             created.append({"email": a["email"], "recovery_email": box["address"]})
         self._progress.pop(progress_id, None)
+        self._audit_diff(before)
         return {"created": created, "skipped": skipped, "failed": failed}
 
     # ---------- 自建郵箱管理窗口：本地列表和 BillionMail 後台同步 ----------
@@ -1010,6 +1045,9 @@ class Api:
         now = int(time.time())
         added = updated = removed = 0
         seen, mx = set(), {}
+        remote = {(b.get("username") or "").strip().lower() for b in boxes} - {""}
+        before = self._audit_snapshot([r["id"] for r in local.values()])
+        gone = {r["id"]: before[r["id"]] for k, r in local.items() if k not in remote and r["id"] in before}
         cols = ", ".join(FIELDS)
         marks = ", ".join("?" for _ in FIELDS)
         st = self._store
@@ -1055,6 +1093,8 @@ class Api:
                     st.conn.execute("DELETE FROM accounts WHERE id=?", (r["id"],))
                     removed += 1
             st.conn.commit()
+        self._audit_diff({k: v for k, v in before.items() if k not in gone}, actor="sync")
+        self._audit_deleted(gone, actor="sync")
         if mx:  # 每個域名的郵件服務器，收信時優先嘗試
             cache = self._domain_cache()
             cache.setdefault("mx", {}).update(mx)
@@ -1124,7 +1164,9 @@ class Api:
         row = self._store.query("SELECT id FROM accounts WHERE sheet_id=? AND lower(email)=?", (sid, email.lower()))
         enc = self._cipher.encrypt(password)
         if row:
+            before = self._audit_snapshot([row[0]["id"]])
             self._store.execute("UPDATE accounts SET password=?, status=?, updated_at=? WHERE id=?", (enc, status, now, row[0]["id"]))
+            self._audit_diff(before)
             if gids:
                 self._change_groups([row[0]["id"]], "add", gids)
             return row[0]["id"]
@@ -1461,6 +1503,8 @@ class Api:
         now = int(time.time())
         cols = FIELDS + ["sheet_id", "status", "group_id", "extra", "created_at", "updated_at"]
         sql = f"INSERT OR REPLACE INTO accounts(id, {', '.join(cols)}) VALUES ({', '.join('?' for _ in range(len(cols) + 1))})"
+        restored = [int(r["id"]) for r in rows or []]
+        before = self._audit_snapshot(restored)
         st = self._store
         with st.lock:
             for r in rows or []:
@@ -1485,6 +1529,128 @@ class Api:
                         st.conn.execute("INSERT OR REPLACE INTO family_members(family_id, account_id, role) VALUES (?, ?, ?)",
                                         (fid, int(r["id"]), role))
             st.conn.commit()
+        self._audit_diff(before, restored, action="restore")
+
+    # ---------- 操作記錄 ----------
+    def call_as(self, actor, method, args=None):
+        """前端以某個身份調用方法：AI 助手的調用用 actor="agent"，操作記錄裡就記為 AI 助手。"""
+        if actor not in ("user", "agent") or not isinstance(method, str) or method.startswith("_") or method == "call_as":
+            raise ValueError("bad call")
+        fn = getattr(self, method, None)
+        if not callable(fn):
+            raise AttributeError(method)
+        prev = getattr(_ACTOR, "name", None)
+        _ACTOR.name = actor
+        try:
+            return fn(*(args or []))
+        finally:
+            _ACTOR.name = prev
+
+    def _audit_snapshot(self, ids):
+        """改動前的值（解密後）：{id: 行}，行裡帶 sheet_name。"""
+        ids = [int(i) for i in ids or []]
+        out = {}
+        if self._cipher is None:
+            return out
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for r in self._store.query("SELECT a.*, s.name AS sheet_name FROM accounts a LEFT JOIN sheets s ON s.id = a.sheet_id "
+                                       f"WHERE a.id IN ({','.join('?' for _ in chunk)})", chunk):
+                out[r["id"]] = self._decrypt_row(r)
+        return out
+
+    def _audit_diff(self, before, ids=None, action="update", actor=None):
+        """和改動前的快照比較，敏感字段變了就記一條：變更前 → 變更後。ids 裡快照沒有的（被恢復的已刪除郵箱）按空值比較。"""
+        ids = list(before) if ids is None else [int(i) for i in ids]
+        if not ids:
+            return
+        after = self._audit_snapshot(ids)
+        entries = []
+        for aid in ids:
+            a = after.get(aid)
+            if a is None:
+                continue
+            b = before.get(aid) or {}
+            for f in AUDIT_FIELDS:
+                old, new = str(b.get(f) or ""), str(a.get(f) or "")
+                if old != new:
+                    entries.append({"action": action, "account_id": aid, "email": a["email"], "sheet": a.get("sheet_name") or "",
+                                    "field": f, "before": old, "after": new})
+        self._audit_write(entries, actor)
+
+    def _audit_deleted(self, rows, actor=None):
+        """刪除郵箱：每個郵箱記一條，變更前 = 刪除前的敏感字段（JSON），需要時能找回。"""
+        self._audit_write([{"action": "delete", "account_id": r["id"], "email": r["email"], "sheet": r.get("sheet_name") or "",
+                            "before": json.dumps({f: r[f] for f in AUDIT_FIELDS if f != "email" and r.get(f)}, ensure_ascii=False)}
+                           for r in (rows or {}).values()], actor)
+
+    def _audit_security(self, field, before="", after=""):
+        self._audit_write([{"action": "security", "field": field, "before": before, "after": after}])
+
+    def _audit_write(self, entries, actor=None):
+        if not entries or self._cipher is None:
+            return
+        actor = actor or getattr(_ACTOR, "name", None) or "user"
+        now = int(time.time() * 1000)
+        enc = self._cipher.encrypt
+        rows = [(now, actor, e["action"], e.get("account_id"), e.get("email") or "", e.get("sheet") or "", e.get("field") or "",
+                 enc(str(e.get("before") or "")), enc(str(e.get("after") or ""))) for e in entries]
+        st = self._store
+        with st.lock:
+            st.conn.executemany("INSERT INTO audit_log(ts, actor, action, account_id, email, sheet, field, before, after) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            st.conn.execute("DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?", (AUDIT_MAX,))
+            st.conn.commit()
+
+    @need_unlock
+    def list_audit(self, q=None):
+        """查詢操作記錄（新的在前）。q：search（郵箱 / 列表 / 變更前後的內容）、actor、field（字段名，或 delete / restore / security）、
+        email（精確）、start / end（毫秒時間戳）、offset、limit。"""
+        q = q or {}
+        where, args = [], []
+        if q.get("actor"):
+            where.append("actor=?")
+            args.append(q["actor"])
+        kind = q.get("field") or ""
+        if kind in ("delete", "security", "restore"):
+            where.append("action=?")
+            args.append(kind)
+        elif kind:
+            where.append("field=? AND action IN ('update', 'restore')")
+            args.append(kind)
+        if q.get("email"):
+            where.append("lower(email)=?")
+            args.append(str(q["email"]).strip().lower())
+        if q.get("start"):
+            where.append("ts>=?")
+            args.append(int(q["start"]))
+        if q.get("end"):
+            where.append("ts<?")
+            args.append(int(q["end"]))
+        rows = self._store.query("SELECT * FROM audit_log" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id DESC", args)
+
+        def dec(r):
+            for f in ("before", "after"):
+                try:
+                    r[f] = self._cipher.decrypt(r[f])
+                except vault.WrongPassword:
+                    r[f] = "?"
+            return r
+
+        search = str(q.get("search") or "").strip().lower()
+        if search:
+            rows = [r for r in map(dec, rows)
+                    if any(search in str(r[f]).lower() for f in ("email", "sheet", "before", "after"))]
+        try:
+            offset = max(0, int(q.get("offset") or 0))
+            limit = max(1, min(int(q.get("limit") or 100), 1000))
+        except (TypeError, ValueError):
+            offset, limit = 0, 100
+        page = rows[offset:offset + limit]
+        if not search:
+            page = [dec(r) for r in page]
+        total_all = self._store.query("SELECT COUNT(*) AS n FROM audit_log")[0]["n"]
+        return {"total": len(rows), "all": total_all, "max": AUDIT_MAX, "offset": offset, "items": page}
 
     # ---------- AI 助手操作電腦（文件、命令），見 fsagent.py ----------
     def _computer(self, fn, *args):
@@ -1627,8 +1793,12 @@ class Api:
             port = 0
         if not 1 <= port <= 65535:
             raise ValueError("err.api_port")
+        was = {k: bool(cur.get(k)) for k in ("enabled", "lan", "allow_locked")}
         cur.update(enabled=bool(cfg.get("enabled")), port=port, lan=bool(cfg.get("lan")),
                    allow_locked=bool(cfg.get("allow_locked", cur.get("allow_locked", True))))
+        for k, old in was.items():
+            if old != cur[k]:
+                self._audit_security("api_" + k, "on" if old else "off", "on" if cur[k] else "off")
         if cur["enabled"] and not cur.get("token_hash"):  # 第一次打開自動生成 Token
             self._api_new_token(cur)
         self._api_sync_wrap(cur)
@@ -1642,6 +1812,7 @@ class Api:
         cfg = self._api_cfg()
         self._api_new_token(cfg)
         self._api_save(cfg)
+        self._audit_security("api_token")
         return self.get_api_config()
 
     @need_unlock

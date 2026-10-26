@@ -192,6 +192,15 @@ const AGENT_TOOLS = [
     theme: { type: 'string', enum: ['light', 'dark', 'system'] }, language: { type: 'string', enum: ['zh-Hant', 'zh-Hans', 'en', 'ja'] },
     auto_lock_minutes: { type: 'integer', description: '0 = 從不' }, show_passwords: { type: 'boolean' },
   }),
+  agentFn('get_history', '查詢操作記錄（新的在前）：密碼、2FA、備用碼、輔助郵箱、備註、狀態等敏感字段的變更前 → 變更後，刪除的郵箱（變更前是刪除時的字段，可以用來找回），主密碼 / API 密鑰的改動。用來回答「這個郵箱以前的密碼是什麼」「剛才誰改了 2FA」「刪掉的郵箱密碼還能找回嗎」', {
+    email: { type: 'string', description: '只看這個郵箱' },
+    field: { type: 'string', enum: ['email', 'password', 'totp_secret', 'backup_codes', 'recovery_email', 'recovery_password', 'oauth_client_id', 'oauth_token', 'phone', 'notes', 'status', 'delete', 'restore', 'security'],
+      description: '只看這個字段；delete = 刪除郵箱，restore = 撤銷恢復，security = 主密碼 / API 設置' },
+    actor: { type: 'string', enum: ['user', 'agent', 'sync'], description: 'user = 用戶自己，agent = AI 助手，sync = 自建郵箱同步' },
+    search: { type: 'string', description: '在郵箱、列表名、變更前後的內容裡搜索' },
+    days: { type: 'integer', description: '只看最近幾天' },
+    limit: { type: 'integer', description: '默認 20，最多 100' },
+  }),
   agentFn('undo', '撤銷你在這次對話裡做的修改（默認最近一次）。返回可撤銷的操作列表', { id: { type: 'string', description: '要撤銷的操作 id，不傳 = 最近一次' } }),
 ];
 
@@ -269,6 +278,9 @@ function agentFormatCommand(cmd) {
   return out.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
 }
 
+// AI 助手調用後端：操作記錄裡記為「AI 助手」
+function agentCall(name, ...args) { return callAs('agent', name, ...args); }
+
 function agentConfirmLevel(name, args) {
   if (name === 'delete_accounts') return 'danger';
   if (['manage_sheets', 'manage_columns', 'manage_groups', 'manage_families'].includes(name) && args.action === 'delete') return 'danger';
@@ -318,10 +330,10 @@ const AgentMixin = {
     // 解鎖後調用：載入對話列表，恢復上次的對話和面板狀態
     async agentInit() {
       await this.agentLoadCfg();
-      call('fs_info').then(r => { this.fsInfo = r; }).catch(() => {});
+      agentCall('fs_info').then(r => { this.fsInfo = r; }).catch(() => {});
       await this.agentLoadKb();
       try {
-        this.agent.chats = await call('list_chats', MODE);
+        this.agent.chats = await agentCall('list_chats', MODE);
         const id = this.prefs.agentChatId;
         if (id && this.agent.chats.some(c => c.id === id)) await this.agentOpenChat(id);
         if (this.prefs.agentOpen) this.agent.open = true;
@@ -329,25 +341,25 @@ const AgentMixin = {
     },
     async agentLoadCfg() {
       try {
-        const c = await call('get_ai_config');
+        const c = await agentCall('get_ai_config');
         for (const k of Object.keys(this.agentCfg)) if (c[k] !== undefined) this.agentCfg[k] = c[k];
       } catch { /* 忽略 */ }
     },
     async agentLoadKb() {
-      try { Object.assign(this.kb, { reflected: {}, ...(await call('get_agent_kb')) }); } catch { /* 忽略 */ }
+      try { Object.assign(this.kb, { reflected: {}, ...(await agentCall('get_agent_kb')) }); } catch { /* 忽略 */ }
     },
     async agentSaveKb() {
       const kb = JSON.parse(JSON.stringify(this.kb));
-      await call('save_agent_kb', kb);
+      await agentCall('save_agent_kb', kb);
     },
     async agentRefreshChats() {
-      try { this.agent.chats = await call('list_chats', MODE); } catch { /* 忽略 */ }
+      try { this.agent.chats = await agentCall('list_chats', MODE); } catch { /* 忽略 */ }
     },
     async agentOpenChat(id) {
       const agent = this.agent;
       if (agent.busy) return this.toast(t('agent.busySwitch'), 'error');
       if (id !== agent.chatId) this.agentReflectCurrent();
-      const c = await call('get_chat', id);
+      const c = await agentCall('get_chat', id);
       if (!c) { await this.agentRefreshChats(); return; }
       const d = c.data || {};
       // 上次關閉時還在執行 / 等確認的操作，標記為已中斷
@@ -375,7 +387,7 @@ const AgentMixin = {
     },
     async agentDeleteChat(c) {
       if (!(await this.confirm(t('agent.deleteChat'), t('agent.deleteChatConfirm', { s: c.title || t('agent.untitled') })))) return;
-      await call('delete_chat', c.id);
+      await agentCall('delete_chat', c.id);
       if (c.id === this.agent.chatId) {
         Object.assign(this.agent, { items: [], history: [], undo: [], chatId: null, title: '', token: this.agent.token + 1 });
         this.prefs.agentChatId = null;
@@ -385,7 +397,7 @@ const AgentMixin = {
     async agentRenameChat(c) {
       const name = await this.prompt(t('agent.renameChat'), '', c.title);
       if (!name) return;
-      await call('rename_chat', c.id, name);
+      await agentCall('rename_chat', c.id, name);
       if (c.id === this.agent.chatId) this.agent.title = name;
       await this.agentRefreshChats();
     },
@@ -406,7 +418,7 @@ const AgentMixin = {
       if (!agent.title) agent.title = this.agentAutoTitle();
       const data = JSON.parse(JSON.stringify({ items: agent.items, history: agent.history, undo: agent.undo }));
       try {
-        const id = await call('save_chat', agent.chatId, MODE, agent.title, data);
+        const id = await agentCall('save_chat', agent.chatId, MODE, agent.title, data);
         if (agent.token === token && !agent.chatId) agent.chatId = id;  // 保存期間切換了對話就不改
         if (agent.token === token) this.prefs.agentChatId = id;
         await this.agentRefreshChats();
@@ -478,7 +490,7 @@ const AgentMixin = {
       const images = fromInput ? [...agent.images] : [];
       if ((!text && !images.length) || agent.busy) return;
       try {
-        if (!aiConfigured(await call('get_ai_config'))) return this.toast(t('import.aiNoConfig'), 'error');
+        if (!aiConfigured(await agentCall('get_ai_config'))) return this.toast(t('import.aiNoConfig'), 'error');
       } catch (e) { return this.toast(errText(e), 'error'); }
       if (fromInput) { agent.input = ''; agent.images = []; }
       agent.items.push({ role: 'user', text, images, tools: [] });
@@ -533,7 +545,7 @@ const AgentMixin = {
         const messages = [{ role: 'system', content: this.agentSystemPrompt() }, ...context];
         let result;
         try {
-          const job = await call('ai_chat_start', messages, this.agentTools);
+          const job = await agentCall('ai_chat_start', messages, this.agentTools);
           result = await pollAiJob(job, d => { item.text += d; this.agentScroll(); }, () => agent.stop,
             r => { if (r.tool) { item.tool = r.tool; item.toolChars = r.tool_chars; } });
         } catch (e) {
@@ -604,6 +616,7 @@ const AgentMixin = {
         case 'get_2fa_codes': return t('agent.sum.found', { n: out.codes?.length || 0 });
         case 'fetch_mail': return t('agent.sum.mails', { n: out.messages?.length || 0 });
         case 'undo': return out.undone || '✓';
+        case 'get_history': return t('agent.sum.found', { n: out.total ?? 0 });
         case 'remember': return out.memory || '✓';
         case 'save_skill': return out.skill || '✓';
         case 'read_skill': return out.name || '✓';
@@ -698,7 +711,8 @@ ${learnRule}- 用戶粘貼的內容常夾雜從網頁複製來的雜訊（圖標
 - 「把備註列放到郵箱後面，隱藏手機號」→ manage_columns({action:"move",name:"備註",after:"郵箱"}) + manage_columns({action:"hide",name:"手機號"})
 - 「分組 29 移到第一個 / 置頂」→ manage_groups({action:"move",name:"29",position:1})；「29 分組往上移一位」→ manage_groups({action:"move",name:"29",offset:-1})
 - 「把 新號 分組放到 222 後面」→ manage_groups({action:"move",name:"新號",after:"222"})；「默認列表放最後」→ manage_sheets({action:"move",name:"默認列表",position:-1})
-- 「剛才改錯了」→ undo${this.agentCfg.agent_computer ? `
+- 「剛才改錯了」→ undo
+- 「這個郵箱以前的密碼 / 2FA 是什麼」「誰改了備註」「被刪除的郵箱還能找回密碼嗎」→ get_history${this.agentCfg.agent_computer ? `
 - 「統計 E\\workspace\\號池\\新號商 的郵箱並加到 yutoux 分組」→ fs_scan_accounts({path:"E\\workspace\\號池\\新號商"}) → update_accounts({filter:{scan_id}, set:{add_groups:["yutoux"]}}) → 有 not_in_sheet 時 import_text({scan_id, group:"yutoux"})
 - 「把 yutoux 分組導出到桌面」→ export_accounts({filter:{conditions:[{field:"group",op:"eq",value:"yutoux"}]}, format:"txt", path: 桌面路徑})` : ''}
 ${SELFMAIL ? `
@@ -747,7 +761,7 @@ ${learned ? '\n' + learned + '\n' : ''}
           const i = this.backupList(a).findIndex(x => !x.used);
           if (i < 0) return { error: 'no unused backup codes left', total: this.backupList(a).length };
           const code = this.backupList(a)[i].code;
-          await this.copyBackup(a, i, true);
+          await this.copyBackup(a, i, true, 'agent');
           const out = { copied: true, number: i + 1, left: this.backupLeft(a), total: this.backupList(a).length };
           if (this.prefs.agentSecrets) out.code = code;
           return out;
@@ -763,30 +777,31 @@ ${learned ? '\n' + learned + '\n' : ''}
               const d = new Date(), p2 = n => String(n).padStart(2, '0');
               path = path.replace(/[\\/]+$/, '') + `\\mail_export_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}.${fmt}`;
             }
-            const r = await call('fs_write', path, this.buildExport(rows, fmt), false, !!args.overwrite);
+            const r = await agentCall('fs_write', path, this.buildExport(rows, fmt), false, !!args.overwrite);
             return r.error ? r : { exported: rows.length, path: r.path };
           }
           await this.doExport(fmt, rows);
           return { exported: rows.length };
         }
-        case 'fs_list': return call('fs_list', args.path, args.pattern || '', !!args.recursive, args.limit || 200);
+        case 'fs_list': return agentCall('fs_list', args.path, args.pattern || '', !!args.recursive, args.limit || 200);
         case 'fs_scan_accounts': return this.agentScan(args);
-        case 'fs_read': return call('fs_read', args.path, args.offset || 1, args.limit || 200);
-        case 'fs_search': return call('fs_search', args.path, args.query || '', !!args.regex, args.pattern || '', args.recursive !== false);
-        case 'fs_write': return call('fs_write', args.path, args.content ?? '', !!args.append, !!args.overwrite);
-        case 'fs_move': return call('fs_move', args.from, args.to, !!args.copy);
-        case 'fs_mkdir': return call('fs_mkdir', args.path);
-        case 'fs_open': return call('fs_reveal', args.path);
-        case 'run_command': return call('run_command', args.command, args.cwd || '', args.timeout || 60);
+        case 'fs_read': return agentCall('fs_read', args.path, args.offset || 1, args.limit || 200);
+        case 'fs_search': return agentCall('fs_search', args.path, args.query || '', !!args.regex, args.pattern || '', args.recursive !== false);
+        case 'fs_write': return agentCall('fs_write', args.path, args.content ?? '', !!args.append, !!args.overwrite);
+        case 'fs_move': return agentCall('fs_move', args.from, args.to, !!args.copy);
+        case 'fs_mkdir': return agentCall('fs_mkdir', args.path);
+        case 'fs_open': return agentCall('fs_reveal', args.path);
+        case 'run_command': return agentCall('run_command', args.command, args.cwd || '', args.timeout || 60);
         case 'create_recovery_mailboxes': {
           const rows = this.agentRows(args.filter);
           const undoId = this.agentPushUndo(t('agent.tool.create_recovery_mailboxes'), { rows: this.agentSnapshot(rows) });
-          const r = await withProgress(pid => call('create_recovery_mailboxes', rows.map(a => a.id), args.domain, !!args.overwrite, pid),
+          const r = await withProgress(pid => agentCall('create_recovery_mailboxes', rows.map(a => a.id), args.domain, !!args.overwrite, pid),
             p => { tc.progress = p; });
           await this.loadAccounts();
           return { ...r, undo_id: undoId, note: 'undo only restores the fields; created mailboxes stay on the server' };
         }
         case 'open_account': return this.agentOpen(args);
+        case 'get_history': return this.agentHistory(args);
         case 'set_preferences': return this.agentPrefs(args);
         case 'undo': return this.agentUndo(args.id);
         case 'read_skill': {
@@ -807,7 +822,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'save_skill': return this.agentUpsertSkill({ name: args.name, description: args.description, content: args.content }, 'ai');
         case 'create_mailboxes': return this.agentCreateMailboxes(args, tc);
         case 'sync_mailboxes': {
-          const r = await call('selfmail_sync');
+          const r = await agentCall('selfmail_sync');
           await this.loadAccounts();
           await this.refreshState();
           return r;
@@ -887,6 +902,28 @@ ${learned ? '\n' + learned + '\n' : ''}
       return name;
     },
 
+    // ---------- 操作記錄 ----------
+    async agentHistory(args) {
+      const q = { email: args.email || '', field: args.field || '', actor: args.actor || '', search: args.search || '',
+        limit: Math.max(1, Math.min(parseInt(args.limit, 10) || 20, 100)) };
+      if (args.days) q.start = Date.now() - parseInt(args.days, 10) * 86400000;
+      const r = await agentCall('list_audit', q);
+      const secret = f => AGENT_SECRET_FIELDS.includes(f) && !this.prefs.agentSecrets;
+      const hide = (f, v) => (secret(f) && v ? '(hidden)' : v);
+      return {
+        total: r.total,
+        items: r.items.map(it => {
+          let before = it.before;
+          if (it.action === 'delete') {  // 刪除前的字段：密碼類按權限隱藏
+            try { before = Object.fromEntries(Object.entries(JSON.parse(it.before)).map(([k, v]) => [k, hide(k, v)])); } catch { /* 保持原樣 */ }
+          }
+          return { time: this.histTime(it.ts), actor: it.actor, action: it.action, email: it.email || undefined, sheet: it.sheet || undefined,
+            field: it.field || undefined, before: it.action === 'delete' ? before : hide(it.field, before), after: hide(it.field, it.after) };
+        }),
+        note: this.prefs.agentSecrets ? undefined : 'secret values are hidden; the user can allow reading secrets in the assistant panel',
+      };
+    },
+
     // ---------- 撤銷 ----------
     agentSnapshot(rows) { return JSON.parse(JSON.stringify(rows)); },
     agentPushUndo(label, data) {
@@ -902,17 +939,17 @@ ${learned ? '\n' + learned + '\n' : ''}
       const u = list.splice(idx, 1)[0];
       let rows = u.rows || [];
       if (u.sheet) {  // 恢復被刪除的列表：新建同名列表，郵箱放回去
-        const newId = await call('add_sheet', u.sheet.name);
-        await call('set_sheet_columns', newId, u.sheet.columns);
+        const newId = await agentCall('add_sheet', u.sheet.name);
+        await agentCall('set_sheet_columns', newId, u.sheet.columns);
         rows = rows.map(r => ({ ...r, sheet_id: newId }));
       }
-      if (u.columns) await call('set_sheet_columns', u.columns.sheetId, u.columns.columns);
+      if (u.columns) await agentCall('set_sheet_columns', u.columns.sheetId, u.columns.columns);
       if (u.prefs) Object.assign(this.prefs, JSON.parse(JSON.stringify(u.prefs)));
-      if (u.order) await call('reorder', u.order.kind, u.order.ids);
-      if (u.family) await call('restore_family', u.family);
-      if (u.familyCreated) await call('delete_family', u.familyCreated);
-      if (u.addedIds?.length) await call('delete_accounts', u.addedIds);
-      if (rows.length) await call('restore_accounts', rows);
+      if (u.order) await agentCall('reorder', u.order.kind, u.order.ids);
+      if (u.family) await agentCall('restore_family', u.family);
+      if (u.familyCreated) await agentCall('delete_family', u.familyCreated);
+      if (u.addedIds?.length) await agentCall('delete_accounts', u.addedIds);
+      if (rows.length) await agentCall('restore_accounts', rows);
       for (const m of this.agent.items) for (const tc of m.tools || []) if (tc.undoId === u.id) { tc.undoId = ''; tc.undone = true; }
       await this.reload();
       this.agentSaveSoon();
@@ -1105,7 +1142,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const g = this.groups.find(x => x.name.toLowerCase() === name.toLowerCase());
       if (g) return g.id;
       if (!create) throw new Error(`unknown group "${name}"`);
-      const id = await call('add_group', name, color ? this.agentColor(color) : this.randomColor());
+      const id = await agentCall('add_group', name, color ? this.agentColor(color) : this.randomColor());
       await this.refreshState();
       return id;
     },
@@ -1116,7 +1153,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       if (existing) return { column: existing.name, type: existing.type, existed: true };
       const col = { id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name,
         type: COLUMN_TYPES.includes(type) ? type : 'text' };
-      await call('set_sheet_columns', this.sheetId, [...this.currentSheet.columns, col]);
+      await agentCall('set_sheet_columns', this.sheetId, [...this.currentSheet.columns, col]);
       await this.refreshState();
       return { column: name, type: col.type, created: true };
     },
@@ -1170,7 +1207,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const match = this.searchMatcher(args.search || '');
       const out = [];
       for (const s of this.visibleSheets) {
-        const rows = s.id === this.sheetId ? this.accounts : await call('list_accounts', s.id);
+        const rows = s.id === this.sheetId ? this.accounts : await agentCall('list_accounts', s.id);
         const hits = rows.filter(a => (!set || set.has(a.email.toLowerCase())) && match(a));
         if (hits.length) out.push({ sheet: this.sheetName(s), count: hits.length, emails: hits.slice(0, 30).map(a => a.email) });
       }
@@ -1292,7 +1329,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       let added = 0, skipped = 0;
       const ids = [];
       for (const b of buckets.values()) {
-        const r = await call('import_rows', this.sheetId, b.rows, null, b.status, opts.skip_duplicates !== false, {});
+        const r = await agentCall('import_rows', this.sheetId, b.rows, null, b.status, opts.skip_duplicates !== false, {});
         added += r.added; skipped += r.skipped; ids.push(...(r.ids || []));
       }
       const undoId = ids.length ? this.agentPushUndo(t('agent.tool.add_accounts') + ' ' + ids.length, { addedIds: ids }) : '';
@@ -1344,17 +1381,17 @@ ${learned ? '\n' + learned + '\n' : ''}
         if (!job.rows.length) continue;
         const ids = job.rows.map(a => a.id);
         const set = job.set;
-        if (set.status != null && set.status !== '') await call('set_status', ids, this.agentStatusOrThrow(set.status));
+        if (set.status != null && set.status !== '') await agentCall('set_status', ids, this.agentStatusOrThrow(set.status));
         if (set.groups != null) {
           const gids = [];
           for (const n of set.groups) { const id = await this.agentGroupId(n, true); if (id) gids.push(id); }
-          await call('set_groups', ids, gids);
+          await agentCall('set_groups', ids, gids);
         } else if (set.group != null) {
           const id = await this.agentGroupId(set.group, true);
-          await call('set_groups', ids, id ? [id] : []);
+          await agentCall('set_groups', ids, id ? [id] : []);
         }
-        for (const n of set.add_groups || []) { const id = await this.agentGroupId(n, true); if (id) await call('add_to_group', ids, id); }
-        for (const n of set.remove_groups || []) { const id = await this.agentGroupId(n, false).catch(() => null); if (id) await call('remove_from_group', ids, id); }
+        for (const n of set.add_groups || []) { const id = await this.agentGroupId(n, true); if (id) await agentCall('add_to_group', ids, id); }
+        for (const n of set.remove_groups || []) { const id = await this.agentGroupId(n, false).catch(() => null); if (id) await agentCall('remove_from_group', ids, id); }
         const fieldKeys = AGENT_TEXT_FIELDS.filter(f => set[f] != null);
         const fieldEdits = job.edits.filter(e => this.agentEditTarget(e.field).field);
         if (fieldKeys.length || set.append_notes || fieldEdits.length) {
@@ -1373,7 +1410,7 @@ ${learned ? '\n' + learned + '\n' : ''}
             if (changed) edited++;
             if (Object.keys(fields).length) updates.push({ id: a.id, fields });
           }
-          if (updates.length) await call('update_fields', updates);
+          if (updates.length) await agentCall('update_fields', updates);
         }
         // 自定義列的局部修改
         const colEdits = job.edits.filter(e => this.agentEditTarget(e.field).col);
@@ -1396,7 +1433,7 @@ ${learned ? '\n' + learned + '\n' : ''}
               if (!byValue.has(v)) byValue.set(v, []);
               byValue.get(v).push(a.id);
             }
-            for (const [v, vids] of byValue) await call('set_extra', vids, col.id, v || null);
+            for (const [v, vids] of byValue) await agentCall('set_extra', vids, col.id, v || null);
           }
         }
         for (const [name, value] of Object.entries(job.columns)) {
@@ -1407,7 +1444,7 @@ ${learned ? '\n' + learned + '\n' : ''}
             if (!byValue.has(v)) byValue.set(v, []);
             byValue.get(v).push(a.id);
           }
-          for (const [v, vids] of byValue) await call('set_extra', vids, col.id, v || null);
+          for (const [v, vids] of byValue) await agentCall('set_extra', vids, col.id, v || null);
         }
       }
       await this.loadAccounts();
@@ -1509,7 +1546,7 @@ ${learned ? '\n' + learned + '\n' : ''}
 已有經驗：${JSON.stringify(kb.memories.map(m => m.content))}
 已有技能：${JSON.stringify(kb.skills.map(s => ({ name: s.name, description: s.description })))}
 只輸出一個 JSON 對象，不要其他文字：{"memories": ["..."], "skills": [{"name": "", "description": "", "content": ""}]}；沒有值得記的就輸出 {"memories": [], "skills": []}。`;
-      const job = await call('ai_chat_start', [{ role: 'system', content: prompt }, { role: 'user', content: this.agentCompactTranscript(items) }], null);
+      const job = await agentCall('ai_chat_start', [{ role: 'system', content: prompt }, { role: 'user', content: this.agentCompactTranscript(items) }], null);
       let text = '';
       await pollAiJob(job, d => { text += d; });
       const m = /\{[\s\S]*\}/.exec(text.replace(/```(json)?/g, ''));
@@ -1577,7 +1614,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const rows = this.agentRows(args.filter);
       if (!rows.length) return { deleted: 0 };
       const undoId = SELFMAIL ? '' : this.agentPushUndo(t('agent.tool.delete_accounts') + ' ' + rows.length, { rows: this.agentSnapshot(rows) });
-      await call('delete_accounts', rows.map(a => a.id));
+      await agentCall('delete_accounts', rows.map(a => a.id));
       for (const a of rows) delete this.selected[a.id];
       await this.loadAccounts();
       await this.refreshState();
@@ -1588,13 +1625,13 @@ ${learned ? '\n' + learned + '\n' : ''}
       const name = String(args.sheet || '').trim();
       let sheet = this.agentSheet(name);
       if (!sheet) {
-        await call('add_sheet', name);
+        await agentCall('add_sheet', name);
         await this.refreshState();
         sheet = this.visibleSheets.find(s => s.name === name);
       }
       if (sheet.id === this.sheetId) return { moved: 0, sheet: name, note: 'already in this sheet' };
       const undoId = this.agentPushUndo(t('agent.tool.move_to_sheet') + ' ' + rows.length, { rows: this.agentSnapshot(rows) });
-      await call('move_accounts', rows.map(a => a.id), sheet.id);
+      await agentCall('move_accounts', rows.map(a => a.id), sheet.id);
       this.selected = {};
       await this.loadAccounts();
       await this.refreshState();
@@ -1624,7 +1661,7 @@ ${learned ? '\n' + learned + '\n' : ''}
           const next = cols.map(c => (c.id !== col.id ? c : { ...c,
             name: args.action === 'rename' ? String(args.new_name || '').trim() || c.name : c.name,
             type: args.action === 'set_type' && COLUMN_TYPES.includes(args.type) ? args.type : c.type }));
-          await call('set_sheet_columns', this.sheetId, next);
+          await agentCall('set_sheet_columns', this.sheetId, next);
           await this.refreshState();
           return { ok: true, column: next.find(c => c.id === col.id) };
         }
@@ -1632,7 +1669,7 @@ ${learned ? '\n' + learned + '\n' : ''}
           const col = needCustom();
           // 列的值還留在數據庫裡，撤銷時把列加回來就恢復了
           const undoId = this.agentPushUndo(t('agent.tool.manage_columns') + ' ' + col.name, { columns: { sheetId: this.sheetId, columns: JSON.parse(JSON.stringify(cols)) } });
-          await call('set_sheet_columns', this.sheetId, cols.filter(c => c.id !== col.id));
+          await agentCall('set_sheet_columns', this.sheetId, cols.filter(c => c.id !== col.id));
           await this.refreshState();
           return { deleted: col.name, undo_id: undoId };
         }
@@ -1677,7 +1714,7 @@ ${learned ? '\n' + learned + '\n' : ''}
     // ---------- 操作電腦：統計文件裡的郵箱 ----------
     // 掃描結果（全部郵箱 + 原始行）只留在本地，給 AI 的是統計和 scan_id，密碼不會發給 AI
     async agentScan(args) {
-      const r = await call('fs_scan', args.path, args.pattern || '', args.recursive !== false);
+      const r = await agentCall('fs_scan', args.path, args.pattern || '', args.recursive !== false);
       if (r.error) return r;
       const id = 'scan' + (Object.keys(this._agentScans || {}).length + 1);
       this._agentScans = { ...(this._agentScans || {}), [id]: { emails: r.emails, lines: r.lines, path: r.path } };
@@ -1712,7 +1749,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         const e = String(raw || '').trim().toLowerCase();
         if (!e) continue;
         let id = this.accounts.find(a => a.email.toLowerCase() === e)?.id;
-        if (!id) id = (await call('find_accounts', e, 5)).find(r => r.email.toLowerCase() === e)?.id;
+        if (!id) id = (await agentCall('find_accounts', e, 5)).find(r => r.email.toLowerCase() === e)?.id;
         if (id) { if (!ids.includes(id)) ids.push(id); } else notFound.push(raw);
       }
       return { ids, notFound };
@@ -1749,7 +1786,7 @@ ${learned ? '\n' + learned + '\n' : ''}
             if (!r.ids.length) throw new Error(`owner "${args.owner}" not found in any sheet`);
             owner = r.ids[0];
           }
-          const fid = await call('add_family', { name: args.name, kind: args.kind || '', notes: args.notes || '',
+          const fid = await agentCall('add_family', { name: args.name, kind: args.kind || '', notes: args.notes || '',
             max_members: args.max_members ?? 6, color: this.randomColor() }, owner, ids);
           const undoId = this.agentPushUndo(t('agent.tool.manage_families') + ' ' + args.name, { familyCreated: fid });
           return done(fid, { not_found: notFound.length ? notFound : undefined, undo_id: undoId });
@@ -1762,11 +1799,11 @@ ${learned ? '\n' + learned + '\n' : ''}
           const data = {};
           if (args.new_name) data.name = args.new_name;
           for (const k of ['kind', 'notes', 'max_members']) if (args[k] !== undefined) data[k] = args[k];
-          await call('update_family', f.id, data);
+          await agentCall('update_family', f.id, data);
           return done(f.id, { undo_id: undoId });
         }
         case 'delete': {
-          await call('delete_family', f.id);
+          await agentCall('delete_family', f.id);
           if (this.filters.family === f.id) this.filters.family = '';
           await this.afterFamily();
           return { deleted: f.name, undo_id: undoId };
@@ -1774,7 +1811,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'add_members': case 'remove_members': {
           const { ids, notFound } = await members();
           if (!ids.length) return { error: 'no matching accounts', not_found: notFound };
-          await call(args.action === 'add_members' ? 'family_add' : 'family_remove', f.id, ids);
+          await agentCall(args.action === 'add_members' ? 'family_add' : 'family_remove', f.id, ids);
           return done(f.id, { [args.action === 'add_members' ? 'added' : 'removed']: ids.length, not_found: notFound.length ? notFound : undefined, undo_id: undoId });
         }
         case 'set_owner': {
@@ -1784,7 +1821,7 @@ ${learned ? '\n' + learned + '\n' : ''}
             if (!r.ids.length) throw new Error(`owner "${args.owner}" not found in any sheet`);
             owner = r.ids[0];
           }
-          await call('family_set_owner', f.id, owner);
+          await agentCall('family_set_owner', f.id, owner);
           return done(f.id, { undo_id: undoId });
         }
       }
@@ -1802,7 +1839,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'create': return { group_id: await this.agentGroupId(args.name, true, args.color), name: args.name };
         case 'rename': case 'recolor': {
           const g = find();
-          await call('update_group', g.id, args.action === 'rename' ? String(args.new_name || g.name) : g.name,
+          await agentCall('update_group', g.id, args.action === 'rename' ? String(args.new_name || g.name) : g.name,
             args.color ? this.agentColor(args.color) : g.color);
           await this.refreshState();
           return { ok: true };
@@ -1810,7 +1847,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'move': return this.agentMoveItem('groups', find(), args);
         case 'delete': {
           const g = find();
-          await call('delete_group', g.id);
+          await agentCall('delete_group', g.id);
           if (this.filters.group === g.id) this.filters.group = '';
           await this.refreshState();
           await this.loadAccounts();
@@ -1846,7 +1883,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       pos = Math.max(0, Math.min(rest.length, pos));
       rest.splice(pos, 0, item.id);
       const undoId = this.agentPushUndo(t('agent.tool.manage_' + kind) + ' ' + label(item), { order: { kind, ids } });
-      await call('reorder', kind, rest);
+      await agentCall('reorder', kind, rest);
       await this.refreshState();
       const now = kind === 'groups' ? this.groups : this.visibleSheets;
       return { order: now.map(label), undo_id: undoId };
@@ -1857,7 +1894,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'list': return { current: this.sheetName(this.currentSheet), sheets: this.visibleSheets.map(s => ({ name: this.sheetName(s), count: s.count })) };
         case 'create': {
           if (this.agentSheet(name)) return { exists: true, name };
-          await call('add_sheet', name);
+          await agentCall('add_sheet', name);
           await this.refreshState();
           return { created: name };
         }
@@ -1869,13 +1906,13 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'rename': {
           const s = this.agentSheet(name);
           if (!s) return { error: `no sheet "${name}"` };
-          await call('rename_sheet', s.id, String(args.new_name || '').trim() || s.name);
+          await agentCall('rename_sheet', s.id, String(args.new_name || '').trim() || s.name);
           await this.refreshState();
           return { ok: true };
         }
         case 'switch': {
           let s = this.agentSheet(name);
-          if (!s && args.create) { await call('add_sheet', name); await this.refreshState(); s = this.agentSheet(name); }
+          if (!s && args.create) { await agentCall('add_sheet', name); await this.refreshState(); s = this.agentSheet(name); }
           if (!s) return { error: `no sheet "${name}"`, sheets: this.visibleSheets.map(x => this.sheetName(x)) };
           if (s.id !== this.sheetId) {
             this.sheetId = s.id;
@@ -1889,10 +1926,10 @@ ${learned ? '\n' + learned + '\n' : ''}
           const s = this.agentSheet(name);
           if (!s) return { error: `no sheet "${name}"` };
           if (this.visibleSheets.length <= 1) return { error: t('err.keep_one_sheet') };
-          const rows = await call('list_accounts', s.id);
+          const rows = await agentCall('list_accounts', s.id);
           const undoId = this.agentPushUndo(t('agent.tool.manage_sheets') + ' ' + this.sheetName(s),
             { rows, sheet: { name: s.name, columns: JSON.parse(JSON.stringify(s.columns)) } });
-          await call('delete_sheet', s.id);
+          await agentCall('delete_sheet', s.id);
           await this.reload();
           return { deleted: this.sheetName(s), accounts: rows.length, undo_id: undoId };
         }
@@ -1903,7 +1940,7 @@ ${learned ? '\n' + learned + '\n' : ''}
     // ---------- 2FA / 收信 / 複製 ----------
     async agent2fa(args) {
       const rows = this.agentRows(args.filter).filter(a => a.totp_secret).slice(0, 200);
-      const codes = rows.length ? await call('totp_codes', rows.map(a => a.totp_secret)) : {};
+      const codes = rows.length ? await agentCall('totp_codes', rows.map(a => a.totp_secret)) : {};
       return { seconds_left: 30 - (Math.floor(Date.now() / 1000) % 30),
         codes: rows.map(a => ({ email: a.email, code: codes[a.totp_secret] || '' })) };
     },
@@ -1912,14 +1949,14 @@ ${learned ? '\n' + learned + '\n' : ''}
       if (!a) return { error: `no account "${args.email}" in the current sheet` };
       const which = args.which === 'email' ? 'email' : 'recovery';
       const limit = Math.min(50, Math.max(1, parseInt(args.limit, 10) || 5));
-      const r = await call('fetch_mail', a.id, which, limit);
+      const r = await agentCall('fetch_mail', a.id, which, limit);
       return { address: r.address, total: r.total, messages: r.messages.slice(0, limit).map(m => ({
         from: m.from_name ? `${m.from_name} <${m.from_addr}>` : m.from_addr, subject: m.subject, date: this.fmtDate(m.date),
         folder: m.folder, codes: m.codes, text: (m.text || '').slice(0, 600) })) };
     },
     async agentCreateMailboxes(args, tc) {
       const gid = args.group ? await this.agentGroupId(args.group, true) : null;
-      const r = await withProgress(pid => call('selfmail_create', args.domain || '', args.names || [], parseInt(args.count, 10) || 0,
+      const r = await withProgress(pid => agentCall('selfmail_create', args.domain || '', args.names || [], parseInt(args.count, 10) || 0,
         args.prefix || '', args.password || '', gid, null, pid), p => { if (tc) tc.progress = p; });
       await this.loadAccounts();
       await this.refreshState();

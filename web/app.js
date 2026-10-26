@@ -19,6 +19,11 @@ async function call(name, ...args) {
   return json.data;
 }
 
+// 以某個身份調用（AI 助手 = agent），後台的操作記錄裡記為這個操作人
+function callAs(actor, name, ...args) {
+  return actor && actor !== 'user' ? call('call_as', actor, name, args) : call(name, ...args);
+}
+
 // ---------- 多語言 ----------
 const ui = reactive({ lang: 'zh-Hant' });
 function t(key, params) {
@@ -174,7 +179,7 @@ const app = createApp({
       showPwd: false,
       page: 1, pageSize: 20,
       codes: {}, now: Math.floor(Date.now() / 1000), lastWindow: 0,
-      edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null, apiPage: null,
+      edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null, apiPage: null, histPage: null,
       apiDocs: API_DOCS, apiDocCats: API_DOC_CATS, apiStatusCodes: API_STATUS_CODES,
       familyKinds: FAMILY_KINDS,
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
@@ -495,6 +500,66 @@ const app = createApp({
       cfg.api_key = cfg.api_key ? cfg.api_key : (has_api_key ? null : '');  // 留空 = 保持原 Key
       return cfg;
     },
+    // ---------- 操作記錄：敏感字段的變更前 → 變更後、刪除、安全設置；可篩選搜索 ----------
+    openHistory(email = '') {
+      this.pop = null;
+      this.histPage = { q: { search: '', actor: '', field: '', email, from: '', to: '' }, show: false, offset: 0, limit: 100,
+        data: null, loading: false };
+      this.loadHistory();
+    },
+    async loadHistory(reset = false) {
+      const h = this.histPage;
+      if (!h) return;
+      if (reset) h.offset = 0;
+      const day = v => (v ? new Date(v + 'T00:00:00').getTime() : 0);
+      const q = { search: h.q.search, actor: h.q.actor, field: h.q.field, email: h.q.email, offset: h.offset, limit: h.limit,
+        start: day(h.q.from), end: h.q.to ? day(h.q.to) + 86400000 : 0 };
+      h.loading = true;
+      try { h.data = await call('list_audit', q); } catch (e) { this.toast(errText(e), 'error'); }
+      h.loading = false;
+    },
+    histSearchSoon() {
+      clearTimeout(this._histTimer);
+      this._histTimer = setTimeout(() => this.loadHistory(true), 300);
+    },
+    histPageTo(d) {
+      const h = this.histPage;
+      h.offset = Math.max(0, h.offset + d * h.limit);
+      this.loadHistory();
+    },
+    histReset() {
+      Object.assign(this.histPage.q, { search: '', actor: '', field: '', email: '', from: '', to: '' });
+      this.loadHistory(true);
+    },
+    histTime(ts) {
+      const d = new Date(ts), p = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    },
+    histSecret(field) { return ['password', 'totp_secret', 'backup_codes', 'recovery_password', 'oauth_token'].includes(field); },
+    histFieldLabel(it) {
+      if (it.action === 'delete') return t('hist.deleted');
+      if (it.action === 'security') return t('hist.sec.' + it.field);
+      return t('hist.f.' + it.field);
+    },
+    // 顯示的值：密碼類默認打碼；狀態翻譯；刪除記錄展開成「字段：值」
+    histShow(it, which) {
+      const v = it[which];
+      if (it.action === 'security') return v ? t('hist.' + v) : '';
+      if (it.action === 'delete' && which === 'before') {
+        try {
+          return Object.entries(JSON.parse(v || '{}')).map(([k, x]) =>
+            `${t('hist.f.' + k)}：${this.histSecret(k) && !this.histPage.show ? '••••••' : k === 'status' ? this.statusLabel(x) : x}`).join('\n');
+        } catch { return v; }
+      }
+      if (!v) return '';
+      if (it.field === 'status') return this.statusLabel(v);
+      return this.histSecret(it.field) && !this.histPage.show ? '••••••' : v;
+    },
+    histCopy(it, which) {
+      const v = it[which];
+      if (v && it.action !== 'security') this.copy(v, this.histFieldLabel(it), this.histSecret(it.field) || it.action === 'delete');
+    },
+
     // ---------- 本地 API 頁面：開關、端口、密鑰、接口文檔、在線調試 ----------
     async openApiPage(docId = null) {
       this.settings = null;
@@ -1250,10 +1315,10 @@ const app = createApp({
       const y = r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
       this.pop = { kind: 'backup', account: a, x, y };
     },
-    async saveBackup(a, list) {
+    async saveBackup(a, list, actor = 'user') {
       const text = list.map(x => (x.used ? '~' : '') + x.code).join('\n');
       try {
-        await call('update_fields', [{ id: a.id, fields: { backup_codes: text } }]);
+        await callAs(actor, 'update_fields', [{ id: a.id, fields: { backup_codes: text } }]);
         a.backup_codes = text;
       } catch (e) { this.toast(errText(e), 'error'); }
     },
@@ -1263,10 +1328,10 @@ const app = createApp({
       await this.saveBackup(a, list);
     },
     // 複製一個碼；markUsed = 同時標記為已用
-    async copyBackup(a, i, markUsed) {
+    async copyBackup(a, i, markUsed, actor = 'user') {
       const list = this.backupList(a);
       await this.copy(list[i].code, t('bc.code'));
-      if (markUsed && !list[i].used) { list[i].used = true; await this.saveBackup(a, list); }
+      if (markUsed && !list[i].used) { list[i].used = true; await this.saveBackup(a, list, actor); }
     },
     async copyNextBackup(a) {
       const i = this.backupList(a).findIndex(x => !x.used);
@@ -1627,6 +1692,7 @@ const app = createApp({
         if (this.dialog) this.dialog.resolve(null);
         else if (this.pop) this.pop = null;
         else if (this.apiPage) this.apiPage = null;
+        else if (this.histPage) this.histPage = null;
         else if (this.inbox) this.closeInbox();
         else if (this.bulkCol) this.bulkCol = null;
         else if (this.edit) this.edit = null;
