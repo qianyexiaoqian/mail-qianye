@@ -372,8 +372,9 @@
           </div>
           <div v-if="tc.status === 'confirm'" class="agent-confirm">
             <div class="agent-desc">{{ tc.desc }}</div>
+            <pre v-if="tc.code" class="agent-code">{{ tc.code }}</pre>
             <div class="editor-row">
-              <button class="btn sm" :class="tc.danger ? 'danger' : 'primary'" @click="tc.resolve(true)">{{ tc.danger ? t('btn.delete') : t('agent.run') }}</button>
+              <button class="btn sm" :class="tc.danger ? 'danger' : 'primary'" @click="tc.resolve(true)">{{ tc.danger && tc.name !== 'run_command' ? t('btn.delete') : t('agent.run') }}</button>
               <button class="btn sm" @click="tc.resolve(false)">{{ t('btn.cancel') }}</button>
             </div>
           </div>

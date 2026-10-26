@@ -217,6 +217,8 @@ const I18N = {
     'agent.confirm.exportTo': "導出 {n} 個郵箱（含密碼）到：",
     'agent.sum.fsList': "{n} 項",
     'agent.sum.fsScan': "{n} 個郵箱 · {f} 個文件 · 已在列表 {a} · 未導入 {b}",
+    'agent.confirm.partial': "其中 {n} 行帶有認不出的內容，會照樣導入，多餘內容放進備註",
+    'agent.confirm.longCommand': "命令較長（{n} 字符），請看清楚再執行",
   },
 
   'zh-Hans': {
@@ -436,6 +438,8 @@ const I18N = {
     'agent.confirm.exportTo': "导出 {n} 个邮箱（含密码）到：",
     'agent.sum.fsList': "{n} 项",
     'agent.sum.fsScan': "{n} 个邮箱 · {f} 个文件 · 已在列表 {a} · 未导入 {b}",
+    'agent.confirm.partial': "其中 {n} 行带有认不出的内容，会照样导入，多余内容放进备注",
+    'agent.confirm.longCommand': "命令较长（{n} 字符），请看清楚再执行",
   },
 
   en: {
@@ -655,6 +659,8 @@ const I18N = {
     'agent.confirm.exportTo': "Export {n} accounts (with passwords) to:",
     'agent.sum.fsList': "{n} items",
     'agent.sum.fsScan': "{n} accounts · {f} files · {a} in sheet · {b} not imported",
+    'agent.confirm.partial': "{n} lines have content that matched no field; they will be imported with the extra content in notes",
+    'agent.confirm.longCommand': "Long command ({n} characters) — read it before running",
   },
 
   ja: {
@@ -874,6 +880,8 @@ const I18N = {
     'agent.confirm.exportTo': "{n} 件（パスワード含む）をエクスポート：",
     'agent.sum.fsList': "{n} 件",
     'agent.sum.fsScan': "{n} 件 · {f} ファイル · リスト内 {a} · 未取り込み {b}",
+    'agent.confirm.partial': "うち {n} 行は認識できない内容を含みます。そのまま取り込み、余分な内容はメモに入れます",
+    'agent.confirm.longCommand': "長いコマンドです（{n} 文字）。よく確認してから実行してください",
   },
 };
 

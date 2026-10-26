@@ -566,3 +566,5 @@ tr:hover .inbox-btn { visibility: visible; }
 .fam-result { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 13px; min-width: 0; }
 .fam-result:hover { background: var(--row-hover); }
 .fam-result .mono { min-width: 0; max-width: 260px; }
+.agent-code { margin: 0; max-height: 220px; overflow: auto; padding: 6px 8px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line);
+  font: 11.5px/1.5 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; word-break: break-all; color: var(--text); }

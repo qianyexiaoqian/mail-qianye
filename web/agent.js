@@ -123,6 +123,7 @@ const AGENT_TOOLS = [
   }, ['accounts']),
   agentFn('import_text', '用軟件的智能識別解析原始賬號文本（任意分隔符、任意順序）並導入：text 是用戶粘貼的文本，或者 scan_id = fs_scan_accounts 從文件裡統計到的賬號（用文件裡的原始行導入，已在列表裡的自動跳過）。返回無法識別的行，你可以整理後用 add_accounts 補上', {
     text: { type: 'string' }, scan_id: { type: 'string', description: '導入 fs_scan_accounts 掃描到的賬號（代替 text）' },
+    keep_unrecognized: { type: 'boolean', description: '默認 true：有郵箱但帶了認不出內容的行照樣導入，多餘內容放進備註' },
     group: AGENT_STR, status: AGENT_STR, sheet: AGENT_STR, columns: AGENT_COLUMNS,
     skip_duplicates: { type: 'boolean' },
   }),
@@ -256,6 +257,18 @@ const AGENT_LEARN_TOOLS = [
 const AGENT_MAIN_ONLY = ['add_accounts', 'import_text', 'move_to_sheet', 'manage_sheets', 'manage_families', 'find_in_all_sheets', 'create_recovery_mailboxes'];
 
 // 修改類（確認後執行，可勾選自動執行）和刪除類（總是確認）
+// 確認卡片裡顯示命令：在引號外的「;」處換行，長命令也能看清楚每一步
+function agentFormatCommand(cmd) {
+  let out = '', quote = '';
+  for (const ch of String(cmd || '')) {
+    if (quote) { if (ch === quote) quote = ''; out += ch; continue; }
+    if (ch === '"' || ch === "'") quote = ch;
+    if (ch === ';') { out += ';\n'; continue; }
+    out += ch;
+  }
+  return out.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+}
+
 function agentConfirmLevel(name, args) {
   if (name === 'delete_accounts') return 'danger';
   if (['manage_sheets', 'manage_columns', 'manage_groups', 'manage_families'].includes(name) && args.action === 'delete') return 'danger';
@@ -655,7 +668,8 @@ const AgentMixin = {
   · 名字同時能對上兩種、又看不出指哪個時，簡短地問一句再做。
 ${this.agentCfg.agent_computer ? `- 操作電腦：用戶給出電腦上的路徑時直接用 fs_* 工具（路徑原樣傳入，少冒號、斜槓方向都沒關係；不存在時根據返回的 similar / entries 找到最像的那個再試，不要讓用戶重新輸入）。
   · 統計 / 導入文件裡的郵箱：先 fs_scan_accounts 得到 scan_id 和統計（不要用 fs_read 把賬號文件讀出來，裡面有密碼）。之後用 filter.scan_id 操作這些郵箱：已在當前列表的用 update_accounts({filter:{scan_id}, set:{add_groups:["X"]}}) 加分組；不在列表裡的（not_in_sheet > 0）用 import_text({scan_id, group:"X"}) 導入並放進分組（已在的自動跳過）。用戶只說「統計」時只匯報數字（文件數、郵箱數、重複、已在 / 未在列表）。
-  · 執行命令（run_command）只在文件工具做不到時用，用戶每次都要確認；不要刪除文件、改系統設置。
+  · 不要自己寫腳本（run_command / PowerShell）去解析、拆分、去重、導入賬號文件：import_text({scan_id}) 會識別手機號、國家、接碼鏈接、「標籤:值」等字段，認不出的多餘內容自動放進備註，郵箱照樣導入（返回 partial = 這類行數）。導入後如實匯報 added / skipped / partial / failed_total。
+  · 執行命令（run_command）只用於文件工具做不到的系統操作（解壓、查看磁盤、網絡測試等），命令要短、一次做一件事；用戶每次都要確認；不要刪除文件、改系統設置。
 ` : ''}- 家庭組 ≠ 分組：分組只是標籤；家庭組是郵箱之間的關係（一個組長 + 成員，例如 Google 家庭組 / YouTube 家庭方案），用 manage_families。「把 A 設為組長，B、C 加進去」→ manage_families create（或 set_owner + add_members）；「看 X 家庭組 / 誰是組長」→ manage_families list 或 set_view({family})；篩選家庭組成員用 conditions {field:"family", op:"eq", value:"X"}，所有組長用 {field:"family_role", op:"eq", value:"owner"}。成員可以在別的列表，用郵箱地址指定即可。
 - 用戶糾正你（「不是這個意思」「我說的是…」「錯了」）：先用 undo 撤銷剛才理解錯的那一步，再按正確的理解重新做，並說明已撤銷了什麼。
 - 多步任務就連續調用多個工具一次做完。信息不足時先用查詢類工具弄清楚；只有確實無法判斷用戶意圖時才提問。
@@ -701,6 +715,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const level = agentConfirmLevel(name, args);
       if (level === 'danger' || (level === 'write' && !this.prefs.agentAuto)) {
         tc.desc = await this.agentDescribe(name, args);
+        tc.code = name === 'run_command' ? agentFormatCommand(args.command) : '';
         tc.danger = level === 'danger';
         tc.status = 'confirm';
         this.agentScroll();
@@ -823,9 +838,13 @@ ${learned ? '\n' + learned + '\n' : ''}
               (colNames(list).length ? '\n' + t('agent.confirm.columns', { s: colNames(list).join('、') }) : '');
           }
           case 'import_text': {
-            const p = parseImport(args.text || '', 'auto', 'smart', []);
-            return t('agent.confirm.add', { n: p.rows.length, s: args.sheet || this.sheetName(this.currentSheet) }) +
-              (p.failed.length ? '\n' + t('import.failed', { n: p.failed.length }) : '') +
+            const sc = args.scan_id && this._agentScans?.[args.scan_id];
+            const p = parseImport(sc ? sc.emails.map(e => sc.lines[e]).join('\n') : args.text || '', 'auto', 'smart', []);
+            const keep = args.keep_unrecognized !== false;
+            const partial = keep ? p.failed.filter(f => f.row).length : 0;
+            return t('agent.confirm.add', { n: p.rows.length + partial, s: args.sheet || this.sheetName(this.currentSheet) }) +
+              (partial ? '\n' + t('agent.confirm.partial', { n: partial }) : '') +
+              (p.failed.length - partial ? '\n' + t('import.failed', { n: p.failed.length - partial }) : '') +
               (args.group || args.status ? '\n' + kv({ group: args.group, status: args.status }) : '');
           }
           case 'create_mailboxes': {
@@ -851,7 +870,8 @@ ${learned ? '\n' + learned + '\n' : ''}
             '\n' + args.path + '\n' + String(args.content ?? '').slice(0, 300) + (String(args.content ?? '').length > 300 ? '…' : '');
           case 'fs_move': return t(args.copy ? 'agent.confirm.fsCopy' : 'agent.confirm.fsMove') + `\n${args.from}\n→ ${args.to}`;
           case 'fs_mkdir': return t('agent.confirm.fsMkdir') + '\n' + args.path;
-          case 'run_command': return t('agent.confirm.command') + '\n' + args.command + (args.cwd ? `\n📁 ${args.cwd}` : '');
+          case 'run_command': return t('agent.confirm.command') + (args.cwd ? `\n📁 ${args.cwd}` : '') +
+            (String(args.command || '').length > 300 ? '\n' + t('agent.confirm.longCommand', { n: String(args.command).length }) : '');
           case 'export_accounts': return t('agent.confirm.exportTo', { n: this.agentRows(args.filter).length }) + '\n' + args.path;
           case 'manage_families': {
             if (args.action === 'delete') return t('agent.confirm.deleteFamily', { s: args.name });
@@ -1287,9 +1307,15 @@ ${learned ? '\n' + learned + '\n' : ''}
       }
       if (!String(args.text || '').trim()) throw new Error('text or scan_id is required');
       const p = parseImport(args.text || '', 'auto', 'smart', []);
-      const accounts = p.rows.map(({ country, ...r }) => ({ ...r, country, columns: args.columns }));
+      // 有郵箱但帶了認不出的內容的行：默認照樣導入，多出來的內容放進備註，不丟數據
+      const keep = args.keep_unrecognized !== false;
+      const partial = keep ? p.failed.filter(f => f.row) : [];
+      const failed = p.failed.filter(f => !keep || !f.row);
+      const accounts = [...p.rows, ...partial.map(f => f.row)].map(({ country, ...r }) => ({ ...r, country, columns: args.columns }));
       const r = await this.agentAdd(accounts, args);
-      return { ...r, failed: p.failed.map(f => ({ line: f.n, raw: f.raw, reason: t(f.reason[0], f.reason[1]) })) };
+      const out = { ...r, failed_total: failed.length, failed: failed.slice(0, 20).map(f => ({ line: f.n, raw: f.raw, reason: t(f.reason[0], f.reason[1]) })) };
+      if (partial.length) Object.assign(out, { partial: partial.length, partial_note: 'imported; content that matched no field was kept in notes' });
+      return out;
     },
 
     // ---------- 修改 / 刪除 / 移動 ----------

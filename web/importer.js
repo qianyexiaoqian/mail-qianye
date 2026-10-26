@@ -17,7 +17,15 @@ function countryFromText(s) {
   return top >= 95 ? best : '';
 }
 
+// 網址（接碼鏈接等）裡的 / : | , 不能當分隔符：先換成佔位符，拆完再換回來；otpauth:// 鏈接是 2FA 密鑰，保持原來的處理
+const URL_IN_LINE = /https?:\/\/[^\s|,;，；]+?(?=----|[\s|,;，；]|\/(?=[^\s\/]*@)|$)/gi;
 function splitImportLine(line, sep) {
+  const urls = [];
+  const masked = line.replace(URL_IN_LINE, u => `\u0000${urls.push(u) - 1}\u0000`);
+  const restore = p => p.replace(/\u0000(\d+)\u0000/g, (_, i) => urls[+i]);
+  return splitMasked(masked, sep).map(restore);
+}
+function splitMasked(line, sep) {
   const cut = s => line.split(s).map(p => p.trim());
   if (sep !== 'auto') return cut(sep);
   for (const s of ['----', '\t', '|']) if (line.includes(s)) return cut(s);
@@ -42,14 +50,32 @@ function isTotpSecret(p) {
   return /^[A-Z2-7]+$/.test(s) || (/^[a-z2-7]+$/.test(s) && /\d/.test(s));
 }
 
+// 帶標籤的段「手機：138…」「國家=美國」「接碼鏈接: https://…」：按標籤直接定字段
+const LABEL_FIELDS = [
+  [/^(?:手機號?|手机号?|電話|电话|phone|tel|mobile)$/i, 'phone'],
+  [/^(?:國家|国家|地區|地区|國家\/地區|国家\/地区|country|region)$/i, 'country'],
+  [/^(?:密碼|密码|password|pwd|pass)$/i, 'password'],
+  [/^(?:輔助郵箱|辅助邮箱|恢復郵箱|恢复邮箱|recovery|recovery_email)$/i, 'recovery_email'],
+  [/^(?:2fa|totp|密鑰|密钥|secret)$/i, 'totp_secret'],
+  [/^(?:接碼|接码|接碼鏈接|接码链接|鏈接|链接|sms|url|link|備註|备注|notes?|remark)$/i, 'notes'],
+];
+function labeledPart(p) {
+  const m = /^([^:：=]{1,12})\s*[:：=]\s*(.+)$/.exec(p);
+  if (!m || /^https?$/i.test(m[1].trim())) return null;
+  const hit = LABEL_FIELDS.find(([re]) => re.test(m[1].trim()));
+  return hit ? { field: hit[1], value: m[2].trim() } : null;
+}
+
 function classifyPart(p) {
   if (!p) return 'empty';
   if (EMAIL_RE.test(p)) return 'email';
+  if (/^(?:https?:\/\/|www\.)\S+$/i.test(p)) return 'url';  // 接碼鏈接等網址：放進備註
   if ((p.match(/(?<!\d)\d{4}[ -]?\d{4}(?!\d)/g) || []).length >= 2) return 'backup';  // 多個 8 位碼 = 備用碼
   if (isTotpSecret(p)) return 'totp';
   if (UUID_RE.test(p)) return 'client_id';
   if (p.length >= 80 && !/\s/.test(p)) return 'token';
-  if (/^\+\d[\d\s-]{6,18}$/.test(p)) return 'phone';
+  // 手機號：+86 138…、(+1) 555-…、13800138000；純數字緊跟在郵箱後面時仍按密碼處理（見 smartAssign）
+  if (/^\+\d[\d\s-]{6,18}$/.test(p) || /^\(?\+?\d{1,4}\)?[\s-]?\d[\d\s-]{6,16}$/.test(p) && p.replace(/\D/g, '').length >= 10) return 'phone';
   if (countryFromText(p)) return 'country';
   return 'text';
 }
@@ -62,9 +88,20 @@ const SMART_KIND_FIELD = { backup: 'backup_codes', totp: 'totp_secret', client_i
 function smartAssign(parts) {
   const row = {}, rest = [];
   let prev = '';
+  const note = v => { row.notes = [row.notes, v].filter(Boolean).join(' '); };
   for (const p of parts) {
+    const label = labeledPart(p);
+    if (label) {
+      const v = label.field === 'country' ? countryFromText(label.value) : label.value;
+      if (label.field === 'notes' || !v) note(label.value);
+      else if (!row[label.field]) row[label.field] = v;
+      else rest.push(p);
+      prev = '';
+      continue;
+    }
     const kind = classifyPart(p);
     if (kind === 'empty') { prev = ''; continue; }
+    if (kind === 'url') { note(p); prev = ''; continue; }
     const distinct = kind === 'totp' || kind === 'client_id' || kind === 'token' || kind === 'backup';
     let field = '';
     if (kind === 'email') field = !row.email ? 'email' : 'recovery_email';
