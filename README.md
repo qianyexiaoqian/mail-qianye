@@ -104,6 +104,30 @@ Python + pywebview（桌面窗口）+ Vue 3（界面），數據存在本地 SQL
 **導入**：批量導入窗口頂部有「快速格式」按鈕，點「微軟帶令牌」會自動把字段順序設成 `郵箱 / 密碼 / ClientID / 令牌`。
 **單條編輯**：編輯郵箱時填「ClientID」和「令牌」兩欄即可。令牌用主密碼加密存儲。
 
+## 本地 API（只讀）
+
+默認關閉。在「設置 → API 接口」裡勾選「開啟 API」、填端口（默認 8686）、保存，Token 會自動隨機生成（不能手動填寫，可以重新生成，舊的立即失效）。
+
+- 默認只監聽 `127.0.0.1`；勾選「允許局域網其他設備訪問」才會監聽 `0.0.0.0`
+- 每個請求都要帶 Token：`Authorization: Bearer <Token>`（推薦），或 `X-API-Token` 頭，或 URL 參數 `token=`
+- 軟件鎖定時返回 `423`，解鎖後恢復；Token 只保存哈希用於校驗，明文用主密碼加密
+- 設置裡能看到運行狀態和最近的請求記錄（不記錄 Token）
+
+| 接口 | 說明 |
+| --- | --- |
+| `GET /api/accounts` | 郵箱列表。篩選：`sheet`、`group`（`none` = 未分組）、`family`、`role`、`status`、`email`（逗號分隔）、`search`、`has_2fa`；`fields`、`limit`、`offset`；`format=txt` + `sep` 輸出純文本 |
+| `GET /api/account?email=` | 單個郵箱的全部信息（也可以 `id=`） |
+| `GET /api/2fa?email=` | 當前 2FA 驗證碼和剩餘秒數（多個郵箱用逗號；或 `secret=` 直接算） |
+| `GET /api/groups` / `sheets` / `families` | 分組、列表、家庭組 |
+| `GET /api/health` | 服務狀態、是否鎖定 |
+
+每個郵箱返回：`email, password, totp_code`（2FA 驗證碼）`, totp_secret`（2FA 密鑰）`, totp_remaining, recovery_email, recovery_password, phone, status, notes, sheet, groups, families, backup_codes, oauth_client_id, oauth_token, columns`（自定義列）。
+
+```bash
+curl -H "Authorization: Bearer <Token>" "http://127.0.0.1:8686/api/accounts?group=yutoux"
+curl "http://127.0.0.1:8686/api/accounts?format=txt&fields=email,password,totp_code&token=<Token>"
+```
+
 ## 開發
 
 ```bash
@@ -121,6 +145,8 @@ Python + pywebview（桌面窗口）+ Vue 3（界面），數據存在本地 SQL
 - `mailfetch.py` — IMAP 收信（自建 / 微軟 OAuth2）、郵件解析、驗證碼提取
 - `billionmail.py` — BillionMail 後台管理員客戶端（取郵箱登錄密碼）
 - `aifix.py` — AI 糾錯（OpenAI 兼容 /chat/completions 流式請求、默認提示詞）
+- `apiserver.py` — 本地只讀 HTTP API（Token 校驗、請求記錄）
+- `fsagent.py` — AI 助手操作電腦用的文件 / 命令工具
 - `web/importer.js` — 批量導入的分行、字段識別（智能 / 按順序）
 - `web/agent.js` — AI 助手（工具定義、對話循環、工具執行）
 - `assets/icon.ico` — 程序圖標，由 `tools/make_icon.py` 生成（需要 Pillow）

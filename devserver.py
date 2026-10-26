@@ -42,4 +42,5 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     print(f"http://127.0.0.1:{port}")
+    api.start_http_api()
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

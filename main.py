@@ -32,6 +32,7 @@ def main():
                 pass
 
     window.events.closed += on_main_closed
+    api.start_http_api()  # 設置裡打開了 API 才會啟動
     webview.start()
 
 

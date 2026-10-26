@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import threading
@@ -25,6 +26,7 @@ except ImportError:
     pass
 
 import aifix
+import apiserver
 import billionmail
 import fsagent
 import mailfetch
@@ -264,6 +266,7 @@ class Api:
         self._ai_jobs = {}  # AI 糾錯任務：job_id -> {"text", "done", "error", "stop"}
         self._progress = {}  # 長任務進度：progress_id -> {"done", "total", "current"}，前端輪詢 get_progress
         self._selfmail_lock = threading.RLock()  # 自建郵箱的新建 / 同步不能交錯進行
+        self._http_api = apiserver.ApiServer(self)  # 本地 HTTP API（默認關閉，main.py 啟動時按配置打開）
 
     # ---------- 主密碼 ----------
     def get_lock_state(self):
@@ -307,7 +310,7 @@ class Api:
         salt = vault.new_salt()
         cipher = vault.Cipher(vault.derive_key(password, salt))
         settings = {"kdf_salt": salt, "kdf_n": str(vault.SCRYPT_N), "verifier": cipher.encrypt(vault.VERIFIER)}
-        for name, keys in (("mail_config", self._MAIL_SECRETS), ("ai_config", self._AI_SECRETS)):
+        for name, keys in (("mail_config", self._MAIL_SECRETS), ("ai_config", self._AI_SECRETS), ("api_config", self._API_SECRETS)):
             cfg = json.loads(self._store.get_setting(name) or "{}")
             changed = False
             for key in keys:  # 配置裡的密碼 / Key 也跟著換密鑰
@@ -1529,6 +1532,207 @@ class Api:
     @need_unlock
     def run_command(self, command, cwd="", timeout=60):
         return self._computer(fsagent.run_command, command, cwd, timeout)
+
+    # ---------- 本地 HTTP API（見 apiserver.py）：默認關閉；Token 只能隨機生成，校驗用哈希，明文加密保存 ----------
+    _API_DEFAULTS = {"enabled": False, "port": 8686, "lan": False}
+    _API_SECRETS = ("token",)
+
+    def _api_cfg(self):
+        return {**self._API_DEFAULTS, **json.loads(self._store.get_setting("api_config") or "{}")}
+
+    def _api_save(self, cfg):
+        self._store.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('api_config', ?)", (json.dumps(cfg),))
+
+    def _api_token_hash(self):
+        return self._api_cfg().get("token_hash", "")
+
+    def start_http_api(self):
+        """程序啟動、改配置後調用：按保存的配置啟動或停止 API 服務。"""
+        cfg = self._api_cfg()
+        if cfg["enabled"] and cfg.get("token_hash"):
+            self._http_api.start("0.0.0.0" if cfg["lan"] else "127.0.0.1", cfg["port"])
+        else:
+            self._http_api.stop()
+
+    def _api_new_token(self, cfg):
+        token = "mm_" + secrets.token_urlsafe(32)
+        cfg["token"] = self._cipher.encrypt(token)
+        cfg["token_hash"] = apiserver.token_hash(token)
+
+    @need_unlock
+    def get_api_config(self):
+        cfg = self._api_cfg()
+        return {"enabled": cfg["enabled"], "port": cfg["port"], "lan": cfg["lan"],
+                "token": self._cipher.decrypt(cfg["token"]) if cfg.get("token") else "",
+                "status": self._http_api.status(), "log": list(self._http_api.log)[:30], "endpoints": apiserver.ENDPOINTS}
+
+    @need_unlock
+    def set_api_config(self, cfg):
+        cur = self._api_cfg()
+        try:
+            port = int(cfg.get("port", cur["port"]))
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            raise ValueError("err.api_port")
+        cur.update(enabled=bool(cfg.get("enabled")), port=port, lan=bool(cfg.get("lan")))
+        if cur["enabled"] and not cur.get("token_hash"):  # 第一次打開自動生成 Token
+            self._api_new_token(cur)
+        self._api_save(cur)
+        self.start_http_api()
+        return self.get_api_config()
+
+    @need_unlock
+    def api_regen_token(self):
+        """重新生成 Token，舊的立即失效。"""
+        cfg = self._api_cfg()
+        self._api_new_token(cfg)
+        self._api_save(cfg)
+        return self.get_api_config()
+
+    @need_unlock
+    def api_status(self):
+        return {"status": self._http_api.status(), "log": list(self._http_api.log)[:30]}
+
+    # API 請求的數據（在 API 服務線程裡調用）。返回 (body, 是否純文本)
+    def _api_handle(self, path, p):
+        if path == "/api/health":
+            return {"ok": True, "locked": self._cipher is None, "time": int(time.time())}, False
+        if self._cipher is None:
+            raise PermissionError("locked")
+        if path in ("/", "/api"):
+            return {"endpoints": apiserver.ENDPOINTS}, False
+        ctx = self._api_context()
+        if path == "/api/sheets":
+            counts = {r["sheet_id"]: r["n"] for r in self._store.query("SELECT sheet_id, COUNT(*) AS n FROM accounts GROUP BY sheet_id")}
+            return {"sheets": [{"id": s["id"], "name": s["name"], "kind": s["kind"] or "normal", "count": counts.get(s["id"], 0),
+                                "columns": list(ctx["cols"][s["id"]].values())} for s in ctx["sheets"].values()]}, False
+        if path == "/api/groups":
+            counts = {r["group_id"]: r["n"] for r in self._store.query("SELECT group_id, COUNT(*) AS n FROM account_groups GROUP BY group_id")}
+            return {"groups": [{"id": g["id"], "name": g["name"], "color": g["color"], "count": counts.get(g["id"], 0)}
+                               for g in self._store.query("SELECT * FROM groups ORDER BY sort, id")]}, False
+        if path == "/api/families":
+            return {"families": [{"id": f["id"], "name": f["name"], "kind": f["kind"], "max_members": f["max_members"], "notes": f["notes"],
+                                  "owner": next((m["email"] for m in f["members"] if m["role"] == "owner"), ""),
+                                  "members": [{"email": m["email"], "role": m["role"]} for m in f["members"]]}
+                                 for f in self._families()]}, False
+        if path == "/api/2fa":
+            if p.get("secret"):
+                code = totp_now(p["secret"])
+                if code == "密鑰無效":
+                    raise apiserver.ApiError(400, "invalid secret")
+                return {"code": code, "remaining": 30 - int(time.time()) % 30}, False
+            emails = {e.strip().lower() for e in (p.get("email") or "").split(",") if e.strip()}
+            if not emails:
+                raise apiserver.ApiError(400, "email or secret is required")
+            rows = [self._api_account(r, ctx) for r in self._api_rows() if r["email"].lower() in emails]
+            if not rows:
+                raise apiserver.ApiError(404, "account not found")
+            return {"codes": [{"email": a["email"], "code": a["totp_code"], "remaining": a["totp_remaining"],
+                               **({"error": a["totp_error"]} if a.get("totp_error") else {})} for a in rows]}, False
+        if path == "/api/account":
+            email, aid = (p.get("email") or "").strip().lower(), p.get("id")
+            for r in self._api_rows():
+                if (aid and str(r["id"]) == str(aid)) or (email and r["email"].lower() == email):
+                    return self._api_account(r, ctx), False
+            raise apiserver.ApiError(404, "account not found")
+        if path == "/api/accounts":
+            return self._api_accounts(p, ctx)
+        raise apiserver.ApiError(404, "unknown endpoint, see /api")
+
+    def _api_context(self):
+        sheets = {s["id"]: s for s in self._store.query("SELECT id, name, kind, columns FROM sheets ORDER BY sort, id")}
+        cols = {sid: {c["id"]: c["name"] for c in (normalize_column(x) for x in json.loads(s["columns"] or "[]"))} for sid, s in sheets.items()}
+        groups = {g["id"]: g["name"] for g in self._store.query("SELECT id, name FROM groups")}
+        acc_groups = {}
+        for m in self._store.query("SELECT account_id, group_id FROM account_groups ORDER BY rowid"):
+            if m["group_id"] in groups:
+                acc_groups.setdefault(m["account_id"], []).append(m["group_id"])
+        fams = {f["id"]: f["name"] for f in self._store.query("SELECT id, name FROM families")}
+        acc_fams = {}
+        for m in self._store.query("SELECT account_id, family_id, role FROM family_members ORDER BY rowid"):
+            if m["family_id"] in fams:
+                acc_fams.setdefault(m["account_id"], []).append({"name": fams[m["family_id"]], "role": m["role"]})
+        return {"sheets": sheets, "cols": cols, "groups": groups, "acc_groups": acc_groups, "acc_fams": acc_fams}
+
+    def _api_rows(self):
+        return [self._decrypt_row(r) for r in self._store.query("SELECT * FROM accounts ORDER BY sheet_id, id")]
+
+    def _api_account(self, r, ctx):
+        secret = r["totp_secret"]
+        code = totp_now(secret) if secret else ""
+        codes = [c.strip() for c in (r["backup_codes"] or "").splitlines() if c.strip()]
+        extra = json.loads(r["extra"] or "{}")
+        cols = ctx["cols"].get(r["sheet_id"], {})
+        out = {
+            "id": r["id"], "email": r["email"], "password": r["password"],
+            "totp_secret": secret, "totp_code": "" if code == "密鑰無效" else code,
+            "totp_remaining": 30 - int(time.time()) % 30 if secret else None,
+            "recovery_email": r["recovery_email"], "recovery_password": r["recovery_password"], "phone": r["phone"],
+            "status": r["status"], "notes": r["notes"],
+            "sheet": ctx["sheets"].get(r["sheet_id"], {}).get("name", ""),
+            "groups": [ctx["groups"][g] for g in ctx["acc_groups"].get(r["id"], [])],
+            "families": ctx["acc_fams"].get(r["id"], []),
+            "backup_codes": [c for c in codes if not c.startswith("~")], "backup_codes_used": sum(c.startswith("~") for c in codes),
+            "oauth_client_id": r["oauth_client_id"], "oauth_token": r["oauth_token"],
+            "columns": {cols.get(k, k): v for k, v in extra.items()},
+            "created_at": r["created_at"], "updated_at": r["updated_at"],
+        }
+        if code == "密鑰無效":
+            out["totp_error"] = "invalid secret"
+        return out
+
+    def _api_accounts(self, p, ctx):
+        rows = self._api_rows()
+        lower = lambda v: str(v or "").strip().lower()  # noqa: E731
+        many = lambda v: [x.strip() for x in str(v or "").split(",") if x.strip()]  # noqa: E731
+        if p.get("sheet"):
+            want = {lower(x) for x in many(p["sheet"])}
+            ids = {sid for sid, s in ctx["sheets"].items() if str(sid) in want or s["name"].lower() in want}
+            if not ids:
+                raise apiserver.ApiError(400, f"unknown sheet, available: {', '.join(s['name'] for s in ctx['sheets'].values())}")
+            rows = [r for r in rows if r["sheet_id"] in ids]
+        if p.get("group"):
+            want = [lower(x) for x in many(p["group"])]
+            gids = {gid for gid, name in ctx["groups"].items() if str(gid) in want or name.lower() in want}
+            none = "none" in want
+            if not gids and not none:
+                raise apiserver.ApiError(400, f"unknown group, available: {', '.join(ctx['groups'].values())}")
+            rows = [r for r in rows if (none and not ctx["acc_groups"].get(r["id"])) or gids & set(ctx["acc_groups"].get(r["id"], []))]
+        if p.get("family"):
+            want = {lower(x) for x in many(p["family"])}
+            rows = [r for r in rows if any(f["name"].lower() in want for f in ctx["acc_fams"].get(r["id"], []))]
+        if p.get("role"):
+            rows = [r for r in rows if any(f["role"] == lower(p["role"]) for f in ctx["acc_fams"].get(r["id"], []))]
+        if p.get("status"):
+            want = {lower(x) for x in many(p["status"])}
+            rows = [r for r in rows if r["status"].lower() in want]
+        if p.get("email"):
+            want = {lower(x) for x in many(p["email"])}
+            rows = [r for r in rows if r["email"].lower() in want]
+        if p.get("search"):
+            q = lower(p["search"])
+            rows = [r for r in rows if any(q in lower(r[f]) for f in ("email", "recovery_email", "phone", "notes"))]
+        if p.get("has_2fa") in ("1", "true", "yes"):
+            rows = [r for r in rows if r["totp_secret"]]
+        elif p.get("has_2fa") in ("0", "false", "no"):
+            rows = [r for r in rows if not r["totp_secret"]]
+        total = len(rows)
+        try:
+            offset = max(0, int(p.get("offset") or 0))
+            limit = max(1, min(int(p.get("limit") or 1000), 10000))
+        except ValueError:
+            raise apiserver.ApiError(400, "limit / offset must be numbers")
+        accounts = [self._api_account(r, ctx) for r in rows[offset:offset + limit]]
+        fields = many(p.get("fields"))
+        if (p.get("format") or "").lower() in ("txt", "text"):
+            fields = fields or ["email", "password", "totp_secret"]
+            sep = p.get("sep") or "----"
+            fmt = lambda v: ",".join(map(str, v)) if isinstance(v, list) else ("" if v is None else (json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else str(v)))  # noqa: E731
+            return "\n".join(sep.join(fmt(a.get(f, a["columns"].get(f, ""))) for f in fields) for a in accounts), True
+        if fields:
+            accounts = [{f: a.get(f, a["columns"].get(f)) for f in ["email", *[x for x in fields if x != "email"]]} for a in accounts]
+        return {"total": total, "offset": offset, "limit": limit, "count": len(accounts), "accounts": accounts}, False
 
     @need_unlock
     def save_export(self, filename, content):

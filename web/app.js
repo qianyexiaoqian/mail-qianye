@@ -334,6 +334,26 @@ const app = createApp({
       const msg = this.inbox?.messages.find(m => m.codes.length);
       return msg ? { msg, code: msg.codes[0] } : null;
     },
+    apiDirty() {
+      const a = this.settings?.api, b = this.settings?.apiSaved;
+      return !!(a && b && (a.enabled !== b.enabled || a.port !== b.port || a.lan !== b.lan));
+    },
+    apiEndpoints() {
+      return ['/api/accounts', '/api/account', '/api/2fa', '/api/groups', '/api/sheets', '/api/families', '/api/health']
+        .map(path => ({ path, desc: t('api.ep.' + path.slice(5)) }));
+    },
+    apiExamples() {
+      const a = this.settings?.api;
+      if (!a) return [];
+      const base = a.status.running ? a.status.url : `http://127.0.0.1:${a.port}`;
+      return [
+        `curl -H "Authorization: Bearer <TOKEN>" "${base}/api/accounts?group=yutoux"`,
+        `${base}/api/accounts?format=txt&fields=email,password,totp_code&token=<TOKEN>`,
+        `${base}/api/account?email=user@gmail.com&token=<TOKEN>`,
+        `${base}/api/2fa?email=user@gmail.com&token=<TOKEN>`,
+        `${base}/api/groups?token=<TOKEN>`,
+      ];
+    },
     exportScope() {
       return this.selectedIds.length ? t('export.scopeSelected', { n: this.selectedIds.length }) : t('export.scopeShown', { n: this.filtered.length });
     },
@@ -451,15 +471,32 @@ const app = createApp({
       this.settings = { old: '', pw: '', pw2: '', err: '', busy: false, mail: null, ai: null,
         adminTesting: false, adminMsg: '', adminOk: false,
         aiTesting: false, aiMsg: '', aiOk: false };
-      const [mail, ai] = await Promise.all([call('get_mail_config'), call('get_ai_config')]);
+      const [mail, ai, api] = await Promise.all([call('get_mail_config'), call('get_ai_config'), call('get_api_config')]);
       if (!this.settings) return;
       this.settings.mail = { ...mail, admin_password: '' };
       this.settings.ai = { ...ai, api_key: '' };
+      this.settings.api = api;
+      this.settings.apiSaved = { enabled: api.enabled, port: api.port, lan: api.lan };
+      this.settings.apiShow = false;
     },
     aiConfigPayload() {
       const { has_api_key, default_prompt, ...cfg } = this.settings.ai;
       cfg.api_key = cfg.api_key ? cfg.api_key : (has_api_key ? null : '');  // 留空 = 保持原 Key
       return cfg;
+    },
+    // ---------- 本地 API ----------
+    async regenApiToken() {
+      const api = this.settings.api;
+      if (api.token && !(await this.confirm(t('api.regen'), t('api.regenConfirm'), t('api.regen')))) return;
+      const r = await call('api_regen_token');
+      if (!this.settings) return;
+      api.token = r.token;
+      this.settings.apiShow = true;
+      this.toast(t('api.regenDone'));
+    },
+    async refreshApiStatus() {
+      const r = await call('api_status');
+      if (this.settings?.api) Object.assign(this.settings.api, r);
     },
     applyAiPreset(p) { Object.assign(this.settings.ai, { base_url: p.base_url, model: p.model }); },
     async testAi() {
@@ -502,7 +539,24 @@ const app = createApp({
         s.busy = true;
         try { await call('change_password', s.old, s.pw); }
         catch (e) { s.busy = false; return (s.err = errText(e)); }
+        Object.assign(s, { old: '', pw: '', pw2: '', busy: false });
         this.toast(t('settings.pwChanged'));
+      }
+      // API 放在最後：啟動失敗、或者第一次打開剛生成了 Token 時，留在設置裡（其他設置已經保存）
+      if (s.api && this.apiDirty) {
+        const { enabled, port, lan } = s.api;
+        const hadToken = !!s.api.token;
+        let r;
+        try { r = await call('set_api_config', { enabled, port, lan }); }
+        catch (e) { return (s.err = errText(e)); }
+        Object.assign(s.api, r);
+        s.apiSaved = { enabled: r.enabled, port: r.port, lan: r.lan };
+        if (r.enabled && !r.status.running) return (s.err = t('api.failed', { s: r.status.error }));  // 端口被佔用等
+        if (r.enabled && !hadToken) {
+          s.apiShow = true;
+          return this.toast(t('api.firstToken'));
+        }
+        this.toast(r.enabled ? t('api.running', { s: r.status.url }) : t('api.turnedOff'));
       }
       this.settings = null;
     },

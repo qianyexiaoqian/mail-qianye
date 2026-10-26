@@ -568,3 +568,15 @@ tr:hover .inbox-btn { visibility: visible; }
 .fam-result .mono { min-width: 0; max-width: 260px; }
 .agent-code { margin: 0; max-height: 220px; overflow: auto; padding: 6px 8px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line);
   font: 11.5px/1.5 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; word-break: break-all; color: var(--text); }
+/* ---------- 本地 API ---------- */
+.api-token input { flex: 1; min-width: 0; font-size: 12px; }
+.api-status { font-size: 13px; }
+.api-docs summary { cursor: pointer; font-size: 13px; color: var(--text-2); padding: 2px 0; }
+.api-docs[open] summary { margin-bottom: 6px; }
+.api-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 4px 0 8px; table-layout: fixed; }
+.api-table td { padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; overflow: hidden; text-overflow: ellipsis; }
+.api-table td.mono { white-space: nowrap; }
+.api-table:not(.api-log) tr td:first-child { width: 34%; }
+.api-example { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+.api-example code { flex: 1; min-width: 0; font-size: 11.5px; padding: 4px 6px; border-radius: 5px; background: var(--panel-2); white-space: pre-wrap; word-break: break-all; }
+.api-log td:nth-child(1) { width: 34%; } .api-log td:nth-child(2) { width: 18%; } .api-log td:nth-child(4) { width: 10%; }
