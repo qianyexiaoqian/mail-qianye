@@ -19,6 +19,12 @@
 
 ## 快速開始
 
+### 直接下載
+
+到 [Releases](https://github.com/qianyexiaoqian/mail-qianye/releases/latest) 下載最新的 `MailManager.exe`，放進一個單獨的文件夾裡雙擊運行，首次啟動會要求設置主密碼。數據文件 `mail_data.db` 會自動創建在 exe 同目錄。
+
+exe 沒有數字簽名，首次運行時 Windows SmartScreen 可能提示「已保護你的電腦」，點「更多信息 → 仍要運行」即可。
+
 ### 環境要求
 
 - Windows 10 / 11（需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，Windows 11 已自帶）
