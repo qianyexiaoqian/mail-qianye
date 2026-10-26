@@ -290,9 +290,27 @@ tr:hover .cell-custom .placeholder { visibility: visible; }
 .bc-code { font-size: 14px; letter-spacing: 1px; }
 .group-cell { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; min-height: 20px; min-width: 40px; }
 .group-cell .tag { flex: none; }
-.group-pick { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
-.group-chip { cursor: pointer; background: transparent; color: var(--text-2); border-color: var(--line-2); font: inherit; font-size: 12px; }
-.group-chip.on { font-weight: 600; }
+/* 下拉多選：框裡是已選標籤，點開是可勾選的列表 */
+.ms-wrap { min-width: 0; }
+.ms { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 34px; padding: 3px 28px 3px 6px; position: relative;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--input-bg); cursor: text; color: var(--text); font-size: 13px; }
+.ms.open, .ms:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px var(--focus); }
+.ms-tag { display: inline-flex; align-items: center; gap: 2px; padding: 1px 4px 1px 8px; font-size: 12px; }
+.ms-x { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 3px; font-size: 14px; line-height: 1; border-radius: 50%; opacity: .7; }
+.ms-x:hover { opacity: 1; background: rgba(0,0,0,.08); }
+.ms .ms-input { flex: 1; min-width: 60px; border: 0 !important; box-shadow: none !important; background: transparent !important; padding: 3px 2px !important; }
+.ms-arrow { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 11px; pointer-events: none; }
+.ms-menu { position: fixed; z-index: 95; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow);
+  padding: 4px; overflow-y: auto; color: var(--text); font-size: 13px; }
+.ms-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; user-select: none; }
+.ms-item.active { background: var(--row-hover); }
+.ms-item.on { color: var(--primary-2); font-weight: 600; }
+.ms-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-check { color: var(--primary-2); font-weight: 700; }
+.ms-create { color: var(--primary-2); }
+.ms-empty { padding: 10px; text-align: center; }
+.imp-group { display: flex; gap: 6px; align-items: center; }
+.imp-group .ms-wrap { min-width: 180px; }
 .group-pop { width: 240px; }
 .group-pop-item { display: flex; gap: 8px; padding: 5px 4px; border-radius: 5px; }
 .group-pop-item:hover { background: var(--row-hover); }

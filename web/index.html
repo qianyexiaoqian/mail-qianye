@@ -519,14 +519,10 @@
         <label>{{ t('col.oauth_client_id') }} <span class="muted">{{ t('edit.oauthHint') }}</span><input v-model="edit.oauth_client_id" data-field="oauth_client_id" class="mono" placeholder="client id"></label>
         <label>{{ t('col.oauth_token') }}<input v-model="edit.oauth_token" data-field="oauth_token" class="mono" placeholder="refresh token"></label>
         <label>{{ t('col.phone') }}<input v-model="edit.phone" data-field="phone" class="mono"></label>
-        <label>{{ t('col.group') }}
-          <div class="group-pick" data-field="group">
-            <button v-for="g in groups" :key="g.id" type="button" class="tag group-chip" :class="{on: edit.group_ids.includes(g.id)}"
-                    :style="edit.group_ids.includes(g.id) ? tagStyle(g.color) : null" @click="toggleEditGroup(g.id)">
-              {{ edit.group_ids.includes(g.id) ? '✓ ' : '' }}{{ g.name }}</button>
-            <span v-if="!groups.length" class="muted">{{ t('group.noGroups') }}</span>
-          </div>
-        </label>
+        <div class="field">{{ t('col.group') }}
+          <multi-select data-field="group" :options="groups" v-model="edit.group_ids" :placeholder="t('group.choose')"
+                        @create="name => createGroupInto(name, edit.group_ids)"></multi-select>
+        </div>
         <label>{{ t('col.status') }}
           <select v-model="edit.status" data-field="status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>
         </label>
@@ -561,9 +557,10 @@
             <option value="&#9;">Tab</option><option value=",">,</option><option value=":">:</option><option value=";">;</option>
           </select>
         </label>
-        <label>{{ t('import.group') }}
-          <select v-model="imp.group_id"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
-        </label>
+        <div class="imp-group">{{ t('import.group') }}
+          <multi-select class="ms-inline" :options="groups" v-model="imp.group_ids" :placeholder="t('group.none')"
+                        @create="name => createGroupInto(name, imp.group_ids)"></multi-select>
+        </div>
         <label>{{ t('import.status') }}
           <select v-model="imp.status"><option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option></select>
         </label>
@@ -754,9 +751,10 @@
               <option v-for="d in selfDomains" :key="d" :value="d">@{{ d }}</option>
             </select>
           </label>
-          <label>{{ t('col.group') }}
-            <select v-model="smCreate.group_id"><option :value="null">{{ t('group.none') }}</option><option v-for="g in groups" :value="g.id">{{ g.name }}</option></select>
-          </label>
+          <div class="field">{{ t('col.group') }}
+            <multi-select :options="groups" v-model="smCreate.group_ids" :placeholder="t('group.none')"
+                          @create="name => createGroupInto(name, smCreate.group_ids)"></multi-select>
+          </div>
           <div class="full editor-row">
             <label class="check"><input type="radio" value="names" v-model="smCreate.mode"> {{ t('selfmail.byNames') }}</label>
             <label class="check"><input type="radio" value="random" v-model="smCreate.mode"> {{ t('selfmail.byRandom') }}</label>

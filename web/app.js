@@ -913,10 +913,13 @@ const app = createApp({
     // ---------- 分組（一個郵箱可以在多個分組） ----------
     accGroups(a) { return (a?.group_ids || (a?.group_id ? [a.group_id] : [])).filter(id => this.groupMap[id]); },
     accGroupNames(a) { return this.accGroups(a).map(id => this.groupMap[id].name); },
-    toggleEditGroup(id) {
-      const list = this.edit.group_ids;
-      const i = list.indexOf(id);
-      if (i >= 0) list.splice(i, 1); else list.push(id);
+    // 下拉多選裡輸入新名字：新建分組並選中
+    async createGroupInto(name, list) {
+      try {
+        const id = await call('add_group', name, this.randomColor());
+        await this.refreshState();
+        if (!list.includes(id)) list.push(id);
+      } catch (e) { this.toast(errText(e), 'error'); }
     },
     openGroupPop(a, e) {
       const r = e.currentTarget.getBoundingClientRect();
@@ -1039,6 +1042,7 @@ const app = createApp({
       if (!el) return;
       el.focus();
       el.scrollIntoView({ block: 'nearest' });
+      if (el.classList.contains('ms-input')) el.dispatchEvent(new Event('focus'));  // 分組下拉：直接展開列表
       if (el.setSelectionRange && /^(text|search|url|tel|password|)$/.test(el.type || '')) {
         try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* 有些輸入框不支持 */ }
       }
@@ -1124,7 +1128,7 @@ const app = createApp({
       const order = [...this.prefs.importOrder];
       while (order.length < 6) order.push('skip');
       this.imp = { text: '', sep: 'auto', mode: this.prefs.importMode === 'manual' ? 'manual' : 'smart', order,
-        group_id: typeof this.filters.group === 'number' ? this.filters.group : null, status: this.meta.statuses[0], skipDup: true,
+        group_ids: typeof this.filters.group === 'number' ? [this.filters.group] : [], status: this.meta.statuses[0], skipDup: true,
         extra: {}, keepPartial: false, showFailed: false,
         // AI 糾錯：results 按原始行緩存結果（改了文本也不用重新請求），tried 記錄已經發給 AI 的行
         ai: { ready: false, results: {}, tried: {}, running: false, stop: false, error: '', text: '', showRaw: false, total: 0, got: 0 } };
@@ -1217,7 +1221,7 @@ const app = createApp({
         rows = rows.map(({ country, ...r }) => (country ? { ...r, extra: { [col.id]: country } } : r));
       }
       const extra = Object.fromEntries(Object.entries(i.extra).filter(([, v]) => v));
-      const r = await call('import_rows', this.sheetId, rows, i.group_id, i.status, i.skipDup, extra);
+      const r = await call('import_rows', this.sheetId, rows, [...i.group_ids], i.status, i.skipDup, extra);
       this.closeImport();
       await this.loadAccounts();
       await this.refreshState();
@@ -1358,7 +1362,7 @@ const app = createApp({
     openSelfmailCreate() {
       if (!this.mailCfg?.panel_url) return this.toast(t('err.admin_required'), 'error');
       this.smCreate = { domain: this.selfDomains[0] || '', mode: 'names', names: '', count: 10, prefix: '', pwMode: 'random', password: '',
-        group_id: typeof this.filters.group === 'number' ? this.filters.group : null, busy: false, result: null };
+        group_ids: typeof this.filters.group === 'number' ? [this.filters.group] : [], busy: false, result: null };
     },
     smCreateCount() {
       const c = this.smCreate;
@@ -1372,7 +1376,7 @@ const app = createApp({
       try {
         const names = c.mode === 'names' ? c.names.split(/[\s,，;；]+/).filter(Boolean) : [];
         c.result = await withProgress(pid => call('selfmail_create', c.domain, names, c.mode === 'random' ? c.count : 0, c.prefix,
-          c.pwMode === 'fixed' ? c.password : '', c.group_id, null, pid), p => { c.progress = p; });
+          c.pwMode === 'fixed' ? c.password : '', [...c.group_ids], null, pid), p => { c.progress = p; });
         await this.loadAccounts();
         await this.refreshState();
         this.toast(t('selfmail.created2', { n: c.result.created.length, f: c.result.failed.length }), c.result.failed.length ? 'error' : 'ok');
@@ -1384,6 +1388,122 @@ const app = createApp({
       if (r) this.copy(r.created.map(x => `${x.email}----${x.password}`).join('\n'), t('copy.rows', { n: r.created.length }), true);
     },
   },
+});
+
+// ---------- 下拉多選（分組）：框裡顯示已選標籤（× 移除），點開列表點一下選中、再點取消；可輸入篩選、輸入新名字直接新建 ----------
+app.component('multi-select', {
+  props: { options: { type: Array, default: () => [] }, modelValue: { type: Array, default: () => [] }, placeholder: String,
+    creatable: { type: Boolean, default: true } },
+  emits: ['update:modelValue', 'create'],
+  data() { return { open: false, q: '', active: 0, menuStyle: {} }; },
+  computed: {
+    selected() { return this.modelValue.map(id => this.options.find(o => o.id === id)).filter(Boolean); },
+    filtered() {
+      const q = this.q.trim().toLowerCase();
+      return q ? this.options.filter(o => o.name.toLowerCase().includes(q)) : this.options;
+    },
+    canCreate() {
+      const q = this.q.trim();
+      return this.creatable && q && !this.options.some(o => o.name.toLowerCase() === q.toLowerCase());
+    },
+  },
+  watch: { q() { this.active = 0; } },
+  beforeUnmount() { this.close(); },
+  methods: {
+    t,
+    tagStyle(color) { return { color, background: color + '1f', borderColor: color + '55' }; },
+    has(id) { return this.modelValue.includes(id); },
+    set(list) { this.$emit('update:modelValue', list); },
+    toggleItem(id) {
+      this.set(this.has(id) ? this.modelValue.filter(x => x !== id) : [...this.modelValue, id]);
+      this.q = '';
+      this.$refs.input?.focus();
+    },
+    remove(id) { this.set(this.modelValue.filter(x => x !== id)); },
+    place() {
+      const r = this.$refs.box?.getBoundingClientRect();
+      if (!r) return;
+      const h = Math.min(280, 40 + this.options.length * 36);
+      const below = window.innerHeight - r.bottom - 8;
+      const top = below >= Math.min(h, 160) || below >= r.top ? r.bottom + 4 : Math.max(8, r.top - h - 4);
+      this.menuStyle = { left: r.left + 'px', top: top + 'px', width: r.width + 'px', maxHeight: Math.min(280, Math.max(120, below >= r.top ? below : r.top - 12)) + 'px' };
+    },
+    openList() {
+      if (this.open) return;
+      this.open = true;
+      this.place();
+      this._outside = e => {
+        if (!this.$refs.box?.contains(e.target) && !this.$refs.menu?.contains(e.target)) this.close();
+      };
+      this._reflow = () => this.place();
+      document.addEventListener('mousedown', this._outside, true);
+      window.addEventListener('scroll', this._reflow, true);
+      window.addEventListener('resize', this._reflow);
+    },
+    close() {
+      if (!this.open) return;
+      this.open = false;
+      this.q = '';
+      document.removeEventListener('mousedown', this._outside, true);
+      window.removeEventListener('scroll', this._reflow, true);
+      window.removeEventListener('resize', this._reflow);
+    },
+    onBoxClick() {
+      if (this.open && document.activeElement === this.$refs.input && !this.q) this.close();
+      else { this.openList(); this.$refs.input?.focus(); }
+    },
+    create() {
+      const name = this.q.trim();
+      if (!name) return;
+      this.$emit('create', name);
+      this.q = '';
+    },
+    // ↑↓ 移動，Enter 選中 / 取消（不觸發外面的保存），Esc 收起（不關閉外面的窗口），Backspace 刪掉最後一個
+    onKey(e) {
+      const n = this.filtered.length + (this.canCreate ? 1 : 0);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!this.open) return this.openList();
+        if (n) this.active = (this.active + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+        nextTick(() => this.$refs.menu?.children[this.active]?.scrollIntoView({ block: 'nearest' }));
+      } else if (e.key === 'Enter' && this.open && !e.isComposing) {
+        e.preventDefault();
+        if (this.active < this.filtered.length) this.toggleItem(this.filtered[this.active].id);
+        else if (this.canCreate) this.create();
+      } else if (e.key === 'Escape' && this.open) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.close();
+      } else if (e.key === 'Backspace' && !this.q && this.modelValue.length) {
+        this.set(this.modelValue.slice(0, -1));
+      } else if (e.key === 'Tab') {
+        this.close();
+      }
+    },
+  },
+  template: `
+    <div class="ms-wrap">
+      <div ref="box" class="ms" :class="{open}" @click="onBoxClick">
+        <span v-for="o in selected" :key="o.id" class="tag ms-tag" :style="tagStyle(o.color)">
+          {{ o.name }}<button type="button" class="ms-x" :title="t('btn.delete')" @click.stop="remove(o.id)">×</button>
+        </span>
+        <input ref="input" v-model="q" class="ms-input" :placeholder="selected.length ? '' : (placeholder || '')"
+               @focus="openList" @input="openList(); active = 0" @keydown="onKey">
+        <span class="ms-arrow">{{ open ? '▴' : '▾' }}</span>
+      </div>
+      <teleport to="body">
+        <div v-if="open" ref="menu" class="ms-menu" :style="menuStyle">
+          <div v-for="(o, i) in filtered" :key="o.id" class="ms-item" :class="{on: has(o.id), active: i === active}"
+               @mousedown.prevent="toggleItem(o.id)" @mouseenter="active = i">
+            <span class="dot" :style="{background: o.color}"></span><span class="ms-name">{{ o.name }}</span>
+            <span v-if="has(o.id)" class="ms-check">✓</span>
+          </div>
+          <div v-if="canCreate" class="ms-item ms-create" :class="{active: active === filtered.length}"
+               @mousedown.prevent="create" @mouseenter="active = filtered.length">＋ {{ t('group.createNamed', {s: q.trim()}) }}</div>
+          <div v-if="!filtered.length && !canCreate" class="ms-empty muted">{{ options.length ? t('group.noMatch') : t('group.noGroups') }}</div>
+        </div>
+      </teleport>
+    </div>`,
 });
 
 // ---------- 自定義列：表格裡的顯示 ----------

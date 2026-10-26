@@ -958,14 +958,15 @@ class Api:
         return {"created": created, "failed": failed}
 
     def _selfmail_upsert(self, sid, email, password, group_id, status):
-        """自建郵箱列表裡加一行；已經有了（例如被同步拉進來過）就更新密碼、分組、狀態。"""
+        """自建郵箱列表裡加一行；已經有了（例如被同步拉進來過）就更新密碼、狀態並加入分組。group_id 可以是一個或多個。"""
         now = int(time.time())
+        gids = self._gids(group_id)
         row = self._store.query("SELECT id FROM accounts WHERE sheet_id=? AND lower(email)=?", (sid, email.lower()))
         enc = self._cipher.encrypt(password)
         if row:
             self._store.execute("UPDATE accounts SET password=?, status=?, updated_at=? WHERE id=?", (enc, status, now, row[0]["id"]))
-            if group_id:
-                self._change_groups([row[0]["id"]], "add", group_id)
+            if gids:
+                self._change_groups([row[0]["id"]], "add", gids)
             return row[0]["id"]
         values = {f: "" for f in FIELDS}
         values.update(email=email, password=password)
@@ -973,9 +974,9 @@ class Api:
         new_id = self._store.execute(
             f"INSERT INTO accounts(sheet_id, {', '.join(FIELDS)}, status, group_id, extra, created_at, updated_at) "
             f"VALUES (?, {', '.join('?' for _ in FIELDS)}, ?, ?, '{{}}', ?, ?)",
-            [sid] + [values[f] for f in FIELDS] + [status, group_id or None, now, now])
-        if group_id:
-            self._change_groups([new_id], "add", group_id)
+            [sid] + [values[f] for f in FIELDS] + [status, gids[0] if gids else None, now, now])
+        if gids:
+            self._change_groups([new_id], "add", gids)
         return new_id
 
     def _selfmail_push(self, row, password=None, active=None):
