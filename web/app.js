@@ -1083,17 +1083,34 @@ const app = createApp({
 
     // ---------- 批量操作 ----------
     togglePage(e) { for (const a of this.paged) this.selected[a.id] = e.target.checked; },
-    async bulkGroup(e) {
-      const v = e.target.value; e.target.value = '';
-      if (!v) return;
-      const [mode, id] = v.split(':');
-      const gid = Number(id);
-      if (mode === 'add') await call('add_to_group', this.selectedIds, gid);
-      else if (mode === 'remove') await call('remove_from_group', this.selectedIds, gid);
-      else if (mode === 'set') await call('set_groups', this.selectedIds, [gid]);
-      else await call('set_groups', this.selectedIds, []);
-      await this.afterBulk(t('bulk.groupDone'), false);
+    // 批量分組：勾選 = 全部加入，取消 = 全部移出；半選表示只有部分郵箱在這個分組
+    openBulkGroupPop(e) {
+      if (this.pop?.kind === 'bulkGroups') { this.pop = null; return; }
+      const r = e.currentTarget.getBoundingClientRect();
+      const w = 260, h = Math.min(360, 80 + this.groups.length * 32);
+      const x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+      const y = r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+      // 記下打開時選中的郵箱：移出當前篩選的分組後它們可能從列表消失，但仍要能再加回來
+      this.pop = { kind: 'bulkGroups', ids: [...this.selectedIds], x, y, busy: false };
     },
+    bulkGroupCount(gid) {
+      const ids = new Set(this.pop?.ids || []);
+      return this.accounts.filter(a => ids.has(a.id) && this.accGroups(a).includes(gid)).length;
+    },
+    async bulkGroupRun(fn) {
+      const pop = this.pop;
+      pop.busy = true;
+      try {
+        await fn(pop.ids);
+        await this.afterBulk(t('bulk.groupDone'), false);
+      } catch (e) { this.toast(errText(e), 'error'); }
+      pop.busy = false;
+    },
+    toggleBulkGroup(gid) {
+      const all = this.bulkGroupCount(gid) === this.pop.ids.length;
+      return this.bulkGroupRun(ids => call(all ? 'remove_from_group' : 'add_to_group', ids, gid));
+    },
+    bulkUngroup() { return this.bulkGroupRun(ids => call('set_groups', ids, [])); },
     async bulkStatus(e) {
       const v = e.target.value; e.target.value = '';
       if (!v) return;

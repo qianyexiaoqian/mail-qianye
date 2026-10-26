@@ -314,6 +314,12 @@ tr:hover .cell-custom .placeholder { visibility: visible; }
 .group-pop { width: 240px; }
 .group-pop-item { display: flex; gap: 8px; padding: 5px 4px; border-radius: 5px; }
 .group-pop-item:hover { background: var(--row-hover); }
+.group-pop-list { max-height: 280px; overflow-y: auto; }
+.group-pop-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-pop-n { font-size: 12px; }
+.bulk-pick { position: relative; border: 1px solid var(--line); border-radius: 6px; padding: 3px 26px 3px 9px; background: var(--input-bg); cursor: pointer; }
+.bulk-pick:hover, .bulk-pick.open { border-color: var(--primary); }
+.bulk-pick.open { box-shadow: 0 0 0 3px var(--focus); }
 .row-index { font-variant-numeric: tabular-nums; font-size: 12px; }
 .col-list { margin: 8px 0 10px; max-height: 52vh; overflow: auto; }
 .col-item { margin-bottom: 4px; }

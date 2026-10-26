@@ -154,13 +154,9 @@
 
     <div v-if="selectedIds.length" class="bulkbar">
       <span v-html="t('bulk.selected', {n: '<b>' + selectedIds.length + '</b>'})"></span>
-      <select @change="bulkGroup($event)">
-        <option value="">{{ t('bulk.setGroup') }}</option>
-        <optgroup :label="t('bulk.addGroup')"><option v-for="g in groups" :key="'a' + g.id" :value="'add:' + g.id">＋ {{ g.name }}</option></optgroup>
-        <optgroup :label="t('bulk.removeGroup')"><option v-for="g in groups" :key="'r' + g.id" :value="'remove:' + g.id">－ {{ g.name }}</option></optgroup>
-        <optgroup :label="t('bulk.onlyGroup')"><option v-for="g in groups" :key="'s' + g.id" :value="'set:' + g.id">＝ {{ g.name }}</option></optgroup>
-        <option value="none">{{ t('bulk.ungroup') }}</option>
-      </select>
+      <button type="button" class="bulk-pick" :class="{open: pop && pop.kind === 'bulkGroups'}" @mousedown.stop @click="openBulkGroupPop($event)">
+        {{ t('bulk.setGroup') }}<span class="ms-arrow">▾</span>
+      </button>
       <select @change="bulkStatus($event)">
         <option value="">{{ t('bulk.setStatus') }}</option>
         <option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option>
@@ -395,6 +391,24 @@
     </label>
     <div v-if="!groups.length" class="muted">{{ t('group.noGroups') }}</div>
     <div class="editor-row" style="margin-top:6px"><button class="link" @click="pop = null; openGroups()">⚙ {{ t('group.manage') }}</button></div>
+  </div>
+  <div v-else-if="pop && pop.kind === 'bulkGroups'" ref="popEl" class="popover group-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+    <div class="popover-title">{{ t('bulk.groupTitle', {n: pop.ids.length}) }}</div>
+    <div class="group-pop-list">
+      <label v-for="g in groups" :key="g.id" class="check group-pop-item" :title="t('bulk.groupTip')">
+        <input type="checkbox" :disabled="pop.busy" :checked="bulkGroupCount(g.id) === pop.ids.length"
+               :indeterminate.prop="bulkGroupCount(g.id) > 0 && bulkGroupCount(g.id) < pop.ids.length"
+               @change="toggleBulkGroup(g.id)">
+        <span class="dot" :style="{background: g.color}"></span><span class="group-pop-name">{{ g.name }}</span>
+        <span v-if="bulkGroupCount(g.id)" class="muted group-pop-n">{{ bulkGroupCount(g.id) }}/{{ pop.ids.length }}</span>
+      </label>
+    </div>
+    <div v-if="!groups.length" class="muted">{{ t('group.noGroups') }}</div>
+    <div class="editor-row" style="margin-top:6px">
+      <button class="link" :disabled="pop.busy" @click="bulkUngroup">{{ t('bulk.ungroup') }}</button>
+      <span class="spacer"></span>
+      <button class="link" @click="pop = null; openGroups()">⚙ {{ t('group.manage') }}</button>
+    </div>
   </div>
   <div v-else-if="pop && pop.kind === 'backup'" ref="popEl" class="popover bc-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
     <div class="popover-title">{{ t('col.backup_codes') }} · {{ pop.account.email }}</div>
