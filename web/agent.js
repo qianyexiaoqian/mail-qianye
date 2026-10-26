@@ -36,7 +36,7 @@ const AGENT_FILTER = {
       items: {
         type: 'object',
         properties: {
-          field: { type: 'string', description: 'email, recovery_email, recovery_domain, domain, phone, notes, status, group, password, totp_secret, recovery_password, oauth_client_id, oauth_token, created_at, updated_at，或自定義列名' },
+          field: { type: 'string', description: 'email, recovery_email, recovery_domain, domain, phone, notes, status, group, family（家庭組名）, family_role（owner=組長 / member=成員 / 空=沒加入）, password, totp_secret, recovery_password, oauth_client_id, oauth_token, created_at, updated_at，或自定義列名' },
           op: { type: 'string', enum: ['eq', 'ne', 'contains', 'not_contains', 'starts_with', 'ends_with', 'empty', 'not_empty', 'regex', 'gt', 'lt', 'in'] },
           value: { description: '比較值；in 用數組；日期用 YYYY-MM-DD' },
         },
@@ -104,6 +104,7 @@ const AGENT_TOOLS = [
   }),
   agentFn('set_view', '設置表格的篩選和搜索框，讓用戶看到結果。只傳要改的項；clear=true 先清除所有篩選', {
     clear: { type: 'boolean' }, search: { type: 'string' }, status: { type: 'string' }, group: { type: 'string', description: '分組名；"none" = 未分組' },
+    family: { type: 'string', description: '家庭組名（組長排第一）；"owner" = 所有組長；"none" = 沒加入家庭組；空 = 不限' },
     domain: { type: 'string', description: '主郵箱域名，例如 gmail.com' }, has_2fa: { type: 'string', enum: ['', 'yes', 'no'] },
     has_recovery: { type: 'string', enum: ['', 'yes', 'no'] }, country: { type: 'string', description: '國家，多個用 / 分隔' },
   }),
@@ -143,6 +144,17 @@ const AGENT_TOOLS = [
     position: { type: 'integer', description: 'move：移到第幾個（1 = 最前面，-1 = 最後面）' },
     before: { type: 'string', description: 'move：放到這個名稱前面' }, after: { type: 'string', description: 'move：放到這個名稱後面' },
     offset: { type: 'integer', description: 'move：相對移動，-1 = 上移一位，2 = 下移兩位' },
+  }, ['action']),
+  agentFn('manage_families', '管理家庭組（郵箱之間的關係：一個組長 + 若干成員，例如 Google 家庭組；成員可以在不同列表，一個郵箱可以在多個家庭組）。' +
+    'list 列出全部家庭組和成員；create 新建（可同時給 owner 組長和 members 成員）；update 改名稱 / 類型 / 人數上限 / 備註；delete 刪除家庭組（不刪郵箱）；' +
+    'add_members 加入成員；remove_members 移出成員；set_owner 設置組長（原組長變成普通成員，owner 留空 = 取消組長）', {
+    action: { type: 'string', enum: ['list', 'create', 'update', 'delete', 'add_members', 'remove_members', 'set_owner'] },
+    name: { type: 'string', description: '家庭組名稱（create 時是新名稱）' }, new_name: AGENT_STR,
+    kind: { type: 'string', description: '類型 / 服務，例如 Google One、YouTube Premium、Microsoft 365' },
+    max_members: { type: 'integer', description: '人數上限（含組長），0 = 不限；create 默認 6' }, notes: AGENT_STR,
+    owner: { type: 'string', description: '組長的郵箱地址' },
+    members: { type: 'array', items: AGENT_STR, description: '成員郵箱地址（可以在任何列表）' },
+    filter: { ...AGENT_FILTER, description: 'add_members / remove_members：也可以用條件選當前列表裡的郵箱作為成員' },
   }, ['action']),
   agentFn('manage_sheets', '管理側邊欄的列表：list / create / rename / switch（切換表格顯示的列表，之後的操作針對它）/ move（調整列表順序）/ delete（連同郵箱，用戶會確認，可撤銷）', {
     action: { type: 'string', enum: ['list', 'create', 'rename', 'switch', 'move', 'delete'] }, name: AGENT_STR, new_name: AGENT_STR,
@@ -205,12 +217,13 @@ const AGENT_LEARN_TOOLS = [
 ];
 
 // 自建郵箱窗口用不上的工具（只有一個列表、郵箱只能在後台新建）
-const AGENT_MAIN_ONLY = ['add_accounts', 'import_text', 'move_to_sheet', 'manage_sheets', 'find_in_all_sheets', 'create_recovery_mailboxes'];
+const AGENT_MAIN_ONLY = ['add_accounts', 'import_text', 'move_to_sheet', 'manage_sheets', 'manage_families', 'find_in_all_sheets', 'create_recovery_mailboxes'];
 
 // 修改類（確認後執行，可勾選自動執行）和刪除類（總是確認）
 function agentConfirmLevel(name, args) {
   if (name === 'delete_accounts') return 'danger';
-  if (['manage_sheets', 'manage_columns', 'manage_groups'].includes(name) && args.action === 'delete') return 'danger';
+  if (['manage_sheets', 'manage_columns', 'manage_groups', 'manage_families'].includes(name) && args.action === 'delete') return 'danger';
+  if (name === 'manage_families' && args.action !== 'list') return 'write';
   if (['update_accounts', 'add_accounts', 'import_text', 'move_to_sheet', 'create_recovery_mailboxes', 'create_mailboxes'].includes(name)) return 'write';
   return '';
 }
@@ -514,6 +527,8 @@ const AgentMixin = {
       const n = out.total ?? out.updated ?? out.added ?? out.deleted ?? out.moved ?? out.copied ?? out.exported ?? out.selected;
       switch (name) {
         case 'set_view': return t('agent.sum.view', { n: out.visible });
+        case 'manage_families': return out.families ? t('agent.sum.families', { n: out.families.length })
+          : (out.family ? `${out.family}${out.members != null ? ' · ' + out.members : ''}` : '✓');
         case 'select_rows': return t('agent.sum.selected', { n: out.selected });
         case 'update_accounts': return t('agent.sum.updated', { n: out.updated });
         case 'add_accounts': case 'import_text':
@@ -544,11 +559,14 @@ const AgentMixin = {
         sheets: this.visibleSheets.map(s => ({ name: this.sheetName(s), count: s.count })),
         columns: this.allColumns.map(c => ({ name: c.label, key: c.custom ? undefined : c.key, type: c.custom ? c.col.type : undefined, visible: this.isColumnVisible(c.key) })),
         groups: this.groups.map(g => g.name),
+        families: SELFMAIL ? undefined : this.families.map(f => ({ name: f.name, kind: f.kind || undefined, owner: this.famOwner(f)?.email || '',
+          members: f.members.length, max: f.max_members || undefined })),
         statuses: this.meta.statuses.map(s => this.statusLabel(s)),
         total_in_sheet: this.accounts.length,
         // 用戶當前在看什麼（用名稱，不用內部 id）
         current_view: {
           group: this.filters.group === '' ? t('group.all') : this.filters.group === 'none' ? t('group.none') : (this.groupMap[this.filters.group]?.name || ''),
+          family: typeof this.filters.family === 'number' ? this.familyMap[this.filters.family]?.name : this.filters.family || undefined,
           status: this.filters.status ? this.statusLabel(this.filters.status) : '', domain: this.filters.domain, country: this.filters.country,
           has_2fa: this.filters.twofa, has_recovery: this.filters.recovery, search: this.search,
           sort: this.sort.key ? `${this.sort.key} ${this.sort.dir > 0 ? 'asc' : 'desc'}` : '',
@@ -578,7 +596,7 @@ const AgentMixin = {
         ? `- 自動學習：用戶糾正你、說明偏好或某個詞的意思時，用 remember 記下（一句話，不記具體郵箱、密碼）；用戶教了一種做法、或你完成了一個以後可能重複的多步任務時，用 save_skill 寫成技能。不要重複記已有的內容。\n`
         : '';
       return `你是「郵箱管理」桌面軟件內置的 AI 助手（agent）。你能通過工具完成這個軟件裡幾乎所有的操作：用戶讓你做什麼，就直接調用工具去做完，而不是教用戶自己去點界面。
-能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表；查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
+能力：查詢、統計、查重、跨列表查找；篩選、搜索、排序、勾選、翻頁；新增郵箱（add_accounts，或 import_text 解析用戶粘貼的原始文本）、修改任意字段/狀態/分組/備註/自定義列、刪除郵箱、移動到其他列表；管理列（新增/改名/改類型/刪除/顯示隱藏/調整順序和寬度）、分組、列表、家庭組（組長 + 成員的關係）；查看 2FA 驗證碼；收取郵件和驗證碼；複製、導出；用 BillionMail 創建自建輔助郵箱；改主題/語言/自動鎖定；撤銷你之前的修改（undo）。
 工作方式：
 - 你擁有上面列出的全部工具。不要說「我沒有這個功能」「需要你在軟件裡手動操作」，也不要提「改名繞過」之類的變通辦法，先看工具能不能直接完成；只有工具確實做不到時才這樣說。
 - 先根據「當前狀態」裡的 groups（側邊欄分組，按顯示順序）、sheets（列表）、columns（表格列）判斷用戶說的名字指的是什麼：
@@ -587,6 +605,7 @@ const AgentMixin = {
   · 「把郵箱放進 / 加到 29 分組」是改郵箱的分組，不是調整分組順序。
 - 一個郵箱可以同時在多個分組：「加入 / 也放進 X 分組」用 set.add_groups（保留原有分組）；「從 X 分組移出」用 set.remove_groups；「只放在 X / 改成 X 分組」才用 set.group 或 set.groups（替換全部）；「移出所有分組」用 set.group=""。篩選「在 X 分組裡的」用 conditions {field:"group", op:"eq", value:"X"}。
   · 名字同時能對上兩種、又看不出指哪個時，簡短地問一句再做。
+- 家庭組 ≠ 分組：分組只是標籤；家庭組是郵箱之間的關係（一個組長 + 成員，例如 Google 家庭組 / YouTube 家庭方案），用 manage_families。「把 A 設為組長，B、C 加進去」→ manage_families create（或 set_owner + add_members）；「看 X 家庭組 / 誰是組長」→ manage_families list 或 set_view({family})；篩選家庭組成員用 conditions {field:"family", op:"eq", value:"X"}，所有組長用 {field:"family_role", op:"eq", value:"owner"}。成員可以在別的列表，用郵箱地址指定即可。
 - 用戶糾正你（「不是這個意思」「我說的是…」「錯了」）：先用 undo 撤銷剛才理解錯的那一步，再按正確的理解重新做，並說明已撤銷了什麼。
 - 多步任務就連續調用多個工具一次做完。信息不足時先用查詢類工具弄清楚；只有確實無法判斷用戶意圖時才提問。
 - 用戶給了賬號數據要導入/添加：原始文本直接 import_text（無法識別的行你自己整理後用 add_accounts 補上）；你已經理解了字段就用 add_accounts。可以同時指定分組、狀態、國家、自定義列（例如「編號」）。
@@ -651,6 +670,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'move_to_sheet': return this.agentMove(args);
         case 'manage_columns': return this.agentManageColumns(args);
         case 'manage_groups': return this.agentManageGroups(args);
+        case 'manage_families': return this.agentManageFamilies(args);
         case 'manage_sheets': return this.agentManageSheets(args);
         case 'get_2fa_codes': return this.agent2fa(args);
         case 'use_backup_code': {
@@ -754,6 +774,15 @@ ${learned ? '\n' + learned + '\n' : ''}
           }
           case 'manage_columns': return t('agent.confirm.deleteColumn', { s: args.name });
           case 'manage_groups': return t('agent.confirm.deleteGroup', { s: args.name });
+          case 'manage_families': {
+            if (args.action === 'delete') return t('agent.confirm.deleteFamily', { s: args.name });
+            const who = [args.owner ? '👑 ' + args.owner : '', ...(args.members || []), args.filter ? t('agent.confirm.byFilter', { n: this.agentRows(args.filter).length }) : '']
+              .filter(Boolean);
+            const info = [[t('family.name'), args.new_name], [t('family.kind'), args.kind], [t('family.max'), args.max_members], [t('col.notes'), args.notes]]
+              .filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k} = ${v}`).join('，');
+            return `${t('agent.fam.' + args.action)}「${args.name || ''}」` + (info ? '\n' + info : '') +
+              (who.length ? '\n' + who.slice(0, 8).join('\n') + (who.length > 8 ? '\n…' : '') : '');
+          }
         }
       } catch (e) { return errText(e); }
       return name;
@@ -781,6 +810,8 @@ ${learned ? '\n' + learned + '\n' : ''}
       if (u.columns) await call('set_sheet_columns', u.columns.sheetId, u.columns.columns);
       if (u.prefs) Object.assign(this.prefs, JSON.parse(JSON.stringify(u.prefs)));
       if (u.order) await call('reorder', u.order.kind, u.order.ids);
+      if (u.family) await call('restore_family', u.family);
+      if (u.familyCreated) await call('delete_family', u.familyCreated);
       if (u.addedIds?.length) await call('delete_accounts', u.addedIds);
       if (rows.length) await call('restore_accounts', rows);
       for (const m of this.agent.items) for (const tc of m.tools || []) if (tc.undoId === u.id) { tc.undoId = ''; tc.undone = true; }
@@ -847,6 +878,8 @@ ${learned ? '\n' + learned + '\n' : ''}
       switch (f) {
         case 'status': return a.status;
         case 'group': return this.accGroupNames(a).join(', ');
+        case 'family': return this.accFamilyNames(a).join(', ');
+        case 'family_role': { const fs = this.accFamilies(a); return fs.some(f => f.role === 'owner') ? 'owner' : fs.length ? 'member' : ''; }
         case 'domain': return domainOf(a.email);
         case 'recovery_domain': return domainOf(a.recovery_email);
         case 'created_at': return a.created_at;
@@ -864,8 +897,8 @@ ${learned ? '\n' + learned + '\n' : ''}
       if (AGENT_SECRET_FIELDS.includes(field) && !this.prefs.agentSecrets && !['empty', 'not_empty'].includes(op)) {
         throw new Error(`${field} only supports empty / not_empty (reading secrets is not allowed)`);
       }
-      if (field === 'group' && ['eq', 'ne', 'in'].includes(op)) {
-        const names = this.accGroupNames(a).map(x => x.toLowerCase());
+      if ((field === 'group' || field === 'family') && ['eq', 'ne', 'in'].includes(op)) {
+        const names = (field === 'group' ? this.accGroupNames(a) : this.accFamilyNames(a)).map(x => x.toLowerCase());
         const wants = (op === 'in' ? (Array.isArray(c.value) ? c.value : String(c.value).split(/[,，]/)) : [c.value])
           .map(x => String(x ?? '').trim().toLowerCase());
         const hit = wants.some(w => (w === '' || w === 'none' ? !names.length : names.includes(w)));
@@ -910,6 +943,8 @@ ${learned ? '\n' + learned + '\n' : ''}
       for (const f of ['email', 'recovery_email', 'phone', 'oauth_client_id']) if (want(f) && (a[f] || !all)) out[f] = a[f] || '';
       if (want('status')) out.status = this.statusLabel(a.status);
       if (want('group') || want('groups')) out.groups = this.accGroupNames(a);
+      if ((want('family') || want('families')) && (this.accFamilies(a).length || !all))
+        out.families = this.accFamilies(a).map(f => ({ name: this.familyMap[f.id].name, role: f.role }));
       if (want('notes') && (a.notes || !all)) out.notes = (a.notes || '').slice(0, 300);
       for (const f of AGENT_SECRET_FIELDS) {
         if (secrets && (all || want(f))) out[f] = a[f] || '';
@@ -1051,6 +1086,12 @@ ${learned ? '\n' + learned + '\n' : ''}
         const g = this.groups.find(x => x.name.toLowerCase() === String(args.group).toLowerCase());
         if (args.group && args.group !== 'none' && !g) throw new Error(`unknown group "${args.group}"`);
         f.group = !args.group ? '' : (args.group === 'none' ? 'none' : g.id);
+      }
+      if (args.family !== undefined && !SELFMAIL) {
+        const v = String(args.family || '').trim();
+        const fam = this.families.find(x => x.name.toLowerCase() === v.toLowerCase());
+        if (v && !['owner', 'none'].includes(v) && !fam) throw new Error(`unknown family "${v}"`);
+        f.family = !v ? '' : (fam ? fam.id : v);
       }
       if (args.domain !== undefined) f.domain = String(args.domain || '').toLowerCase().replace(/^@/, '');
       if (args.has_2fa !== undefined) f.twofa = args.has_2fa || '';
@@ -1520,6 +1561,93 @@ ${learned ? '\n' + learned + '\n' : ''}
           return { ok: true };
         }
       }
+      return { error: 'unknown action ' + args.action };
+    },
+    // ---------- 家庭組 ----------
+    // 郵箱地址 → 賬號 id（先找當前列表，找不到再到所有列表裡找）
+    async agentAccountIds(emails) {
+      const ids = [], notFound = [];
+      for (const raw of emails || []) {
+        const e = String(raw || '').trim().toLowerCase();
+        if (!e) continue;
+        let id = this.accounts.find(a => a.email.toLowerCase() === e)?.id;
+        if (!id) id = (await call('find_accounts', e, 5)).find(r => r.email.toLowerCase() === e)?.id;
+        if (id) { if (!ids.includes(id)) ids.push(id); } else notFound.push(raw);
+      }
+      return { ids, notFound };
+    },
+    agentFamilySnapshot(f) { return JSON.parse(JSON.stringify(f)); },
+    async agentManageFamilies(args) {
+      const find = () => {
+        const f = this.families.find(x => x.name.toLowerCase() === String(args.name || '').trim().toLowerCase());
+        if (!f) throw new Error(`no family "${args.name}", existing: ${this.families.map(x => x.name).join(', ') || '(none)'}`);
+        return f;
+      };
+      const describe = f => ({ name: f.name, kind: f.kind || undefined, max_members: f.max_members || undefined, notes: f.notes || undefined,
+        owner: this.famOwner(f)?.email || '', members: f.members.filter(m => m.role !== 'owner').map(m => m.email),
+        count: f.members.length, over_limit: this.famOver(f) || undefined });
+      const members = async () => {
+        const { ids, notFound } = await this.agentAccountIds(args.members);
+        if (args.filter) for (const a of this.agentRows(args.filter)) if (!ids.includes(a.id)) ids.push(a.id);
+        return { ids, notFound };
+      };
+      const done = async (fid, extra = {}) => {
+        await this.afterFamily();
+        const f = this.familyMap[fid];
+        return { family: f?.name, members: f?.members.length, owner: f ? this.famOwner(f)?.email || '' : undefined,
+          over_limit: f && this.famOver(f) ? `${f.members.length}/${f.max_members}` : undefined, ...extra };
+      };
+      switch (args.action) {
+        case 'list': return { families: this.families.map(describe) };
+        case 'create': {
+          if (!String(args.name || '').trim()) throw new Error('name is required');
+          const { ids, notFound } = await members();
+          let owner = null;
+          if (args.owner) {
+            const r = await this.agentAccountIds([args.owner]);
+            if (!r.ids.length) throw new Error(`owner "${args.owner}" not found in any sheet`);
+            owner = r.ids[0];
+          }
+          const fid = await call('add_family', { name: args.name, kind: args.kind || '', notes: args.notes || '',
+            max_members: args.max_members ?? 6, color: this.randomColor() }, owner, ids);
+          const undoId = this.agentPushUndo(t('agent.tool.manage_families') + ' ' + args.name, { familyCreated: fid });
+          return done(fid, { not_found: notFound.length ? notFound : undefined, undo_id: undoId });
+        }
+      }
+      const f = find();
+      const undoId = this.agentPushUndo(t('agent.tool.manage_families') + ' ' + f.name, { family: this.agentFamilySnapshot(f) });
+      switch (args.action) {
+        case 'update': {
+          const data = {};
+          if (args.new_name) data.name = args.new_name;
+          for (const k of ['kind', 'notes', 'max_members']) if (args[k] !== undefined) data[k] = args[k];
+          await call('update_family', f.id, data);
+          return done(f.id, { undo_id: undoId });
+        }
+        case 'delete': {
+          await call('delete_family', f.id);
+          if (this.filters.family === f.id) this.filters.family = '';
+          await this.afterFamily();
+          return { deleted: f.name, undo_id: undoId };
+        }
+        case 'add_members': case 'remove_members': {
+          const { ids, notFound } = await members();
+          if (!ids.length) return { error: 'no matching accounts', not_found: notFound };
+          await call(args.action === 'add_members' ? 'family_add' : 'family_remove', f.id, ids);
+          return done(f.id, { [args.action === 'add_members' ? 'added' : 'removed']: ids.length, not_found: notFound.length ? notFound : undefined, undo_id: undoId });
+        }
+        case 'set_owner': {
+          let owner = null;
+          if (args.owner) {
+            const r = await this.agentAccountIds([args.owner]);
+            if (!r.ids.length) throw new Error(`owner "${args.owner}" not found in any sheet`);
+            owner = r.ids[0];
+          }
+          await call('family_set_owner', f.id, owner);
+          return done(f.id, { undo_id: undoId });
+        }
+      }
+      this.agent.undo.pop();
       return { error: 'unknown action ' + args.action };
     },
     async agentManageGroups(args) {

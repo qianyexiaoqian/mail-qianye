@@ -88,6 +88,23 @@ CREATE TABLE IF NOT EXISTS account_groups (
     PRIMARY KEY (account_id, group_id)
 );
 CREATE INDEX IF NOT EXISTS idx_account_groups_group ON account_groups(group_id);
+CREATE TABLE IF NOT EXISTS families (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
+    max_members INTEGER NOT NULL DEFAULT 6,
+    notes TEXT NOT NULL DEFAULT '',
+    color TEXT NOT NULL DEFAULT '#f5a524',
+    sort INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS family_members (
+    family_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    PRIMARY KEY (family_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_family_members_account ON family_members(account_id);
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mode TEXT NOT NULL DEFAULT '',
@@ -394,7 +411,7 @@ class Api:
             "SELECT g.*, (SELECT COUNT(*) FROM account_groups ag WHERE ag.group_id = g.id) AS count "
             "FROM groups g ORDER BY sort, id"
         )
-        return {"sheets": sheets, "groups": groups}
+        return {"sheets": sheets, "groups": groups, "families": self._families()}
 
     # ---------- 列表（表格） ----------
     @need_unlock
@@ -418,6 +435,7 @@ class Api:
         if len(self._store.query("SELECT id FROM sheets")) <= 1:
             raise ValueError("err.keep_one_sheet")
         self._store.execute("DELETE FROM account_groups WHERE account_id IN (SELECT id FROM accounts WHERE sheet_id=?)", (sheet_id,))
+        self._store.execute("DELETE FROM family_members WHERE account_id IN (SELECT id FROM accounts WHERE sheet_id=?)", (sheet_id,))
         self._store.execute("DELETE FROM accounts WHERE sheet_id=?", (sheet_id,))
         self._store.execute("DELETE FROM sheets WHERE id=?", (sheet_id,))
 
@@ -435,7 +453,7 @@ class Api:
     @need_unlock
     def reorder(self, kind, ids):
         """按給出的 id 順序排列分組（kind="groups"）或列表（kind="sheets"），沒給出的排在後面。"""
-        table = {"groups": "groups", "sheets": "sheets"}[kind]
+        table = {"groups": "groups", "sheets": "sheets", "families": "families"}[kind]
         ids = [int(i) for i in ids or []]
         rest = [r["id"] for r in self._store.query(f"SELECT id FROM {table} ORDER BY sort, id") if r["id"] not in ids]
         self._store.executemany(f"UPDATE {table} SET sort=? WHERE id=?", [(i, gid) for i, gid in enumerate(ids + rest)])
@@ -509,6 +527,129 @@ class Api:
     def remove_from_group(self, ids, group_id):
         self._change_groups(ids, "remove", group_id)
 
+    # ---------- 家庭組（關係）：一個組長 + 若干成員，成員可以在不同列表；一個郵箱可以在多個家庭組 ----------
+    def _families(self):
+        fams = self._store.query("SELECT * FROM families ORDER BY sort, id")
+        members = {}
+        for m in self._store.query(
+                "SELECT fm.family_id, fm.account_id, fm.role, a.email, a.sheet_id, a.status FROM family_members fm "
+                "JOIN accounts a ON a.id = fm.account_id ORDER BY fm.role='owner' DESC, fm.rowid"):
+            members.setdefault(m.pop("family_id"), []).append(m)
+        for f in fams:
+            f["members"] = members.get(f["id"], [])
+        return fams
+
+    @staticmethod
+    def _family_values(data, partial=False):
+        out = {}
+        if not partial or "name" in data:
+            out["name"] = (data.get("name") or "").strip() or "家庭組"
+        if not partial or "kind" in data:
+            out["kind"] = (data.get("kind") or "").strip()
+        if not partial or "notes" in data:
+            out["notes"] = (data.get("notes") or "").rstrip()
+        if not partial or "max_members" in data:
+            try:
+                out["max_members"] = max(0, int(data.get("max_members") if data.get("max_members") not in (None, "") else 6))
+            except (TypeError, ValueError):
+                out["max_members"] = 6
+        if data.get("color"):
+            out["color"] = data["color"]
+        return out
+
+    @need_unlock
+    def add_family(self, data=None, owner_id=None, member_ids=None):
+        """新建家庭組：data = {name, kind, max_members（0 = 不限，含組長）, notes, color}；可同時指定組長和成員。"""
+        vals = self._family_values(data or {})
+        cols = list(vals)
+        fid = self._store.execute(
+            f"INSERT INTO families({', '.join(cols)}, sort, created_at) VALUES ({', '.join('?' for _ in cols)}, "
+            f"(SELECT COALESCE(MAX(sort), 0) + 1 FROM families), ?)", [vals[c] for c in cols] + [int(time.time())])
+        if member_ids:
+            self.family_add(fid, member_ids)
+        if owner_id:
+            self.family_set_owner(fid, owner_id)
+        return fid
+
+    @need_unlock
+    def update_family(self, family_id, data):
+        vals = self._family_values(data or {}, partial=True)
+        if vals:
+            self._store.execute(f"UPDATE families SET {', '.join(f'{k}=?' for k in vals)} WHERE id=?", [*vals.values(), int(family_id)])
+
+    @need_unlock
+    def delete_family(self, family_id):
+        st = self._store
+        with st.lock:
+            st.conn.execute("DELETE FROM family_members WHERE family_id=?", (int(family_id),))
+            st.conn.execute("DELETE FROM families WHERE id=?", (int(family_id),))
+            st.conn.commit()
+
+    @need_unlock
+    def family_add(self, family_id, ids, role="member"):
+        """加入成員（已在組裡的保持原角色）。role="owner" 時等於設為組長（只取第一個）。"""
+        ids = self._gids(ids)
+        if role == "owner":
+            return self.family_set_owner(family_id, ids[0]) if ids else None
+        self._store.executemany("INSERT OR IGNORE INTO family_members(family_id, account_id, role) VALUES (?, ?, 'member')",
+                                [(int(family_id), a) for a in ids])
+
+    @need_unlock
+    def family_remove(self, family_id, ids):
+        ids = self._gids(ids)
+        if ids:
+            self._store.execute(f"DELETE FROM family_members WHERE family_id=? AND account_id IN ({','.join('?' for _ in ids)})",
+                                [int(family_id)] + ids)
+
+    @need_unlock
+    def family_set_owner(self, family_id, account_id):
+        """設為組長：原來的組長變成普通成員；account_id 為空 = 取消組長。"""
+        st = self._store
+        with st.lock:
+            st.conn.execute("UPDATE family_members SET role='member' WHERE family_id=? AND role='owner'", (int(family_id),))
+            if account_id:
+                st.conn.execute("INSERT OR REPLACE INTO family_members(family_id, account_id, role) VALUES (?, ?, 'owner')",
+                                (int(family_id), int(account_id)))
+            st.conn.commit()
+
+    @need_unlock
+    def restore_family(self, fam):
+        """撤銷用：按 id 把家庭組恢復成快照（_families() 返回的格式），已刪除的重新建立；已不存在的郵箱跳過。"""
+        fid = int(fam["id"])
+        vals = self._family_values(fam)
+        st = self._store
+        with st.lock:
+            st.conn.execute(
+                "INSERT OR REPLACE INTO families(id, name, kind, max_members, notes, color, sort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (fid, vals["name"], vals["kind"], vals["max_members"], vals["notes"], fam.get("color") or "#f5a524",
+                 int(fam.get("sort") or 0), int(fam.get("created_at") or time.time())))
+            st.conn.execute("DELETE FROM family_members WHERE family_id=?", (fid,))
+            for m in fam.get("members") or []:
+                if st.conn.execute("SELECT 1 FROM accounts WHERE id=?", (int(m["account_id"]),)).fetchone():
+                    st.conn.execute("INSERT OR IGNORE INTO family_members(family_id, account_id, role) VALUES (?, ?, ?)",
+                                    (fid, int(m["account_id"]), "owner" if m.get("role") == "owner" else "member"))
+            st.conn.commit()
+
+    @need_unlock
+    def find_accounts(self, query, limit=30):
+        """按郵箱在所有列表裡查找（家庭組添加成員用，成員可以在別的列表）。"""
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        rows = self._store.query(
+            "SELECT a.id, a.email, a.sheet_id, a.status FROM accounts a JOIN sheets s ON s.id = a.sheet_id "
+            "WHERE s.kind='' AND lower(a.email) LIKE ? ORDER BY (lower(a.email) = ?) DESC, (lower(a.email) LIKE ?) DESC, a.email LIMIT ?",
+            (f"%{q}%", q, f"{q}%", int(limit)))
+        fams = {}
+        if rows:
+            marks = ",".join("?" for _ in rows)
+            for m in self._store.query(f"SELECT account_id, family_id, role FROM family_members WHERE account_id IN ({marks})",
+                                       [r["id"] for r in rows]):
+                fams.setdefault(m["account_id"], []).append({"id": m["family_id"], "role": m["role"]})
+        for r in rows:
+            r["families"] = fams.get(r["id"], [])
+        return rows
+
     # ---------- 賬號 ----------
     @need_unlock
     def list_accounts(self, sheet_id):
@@ -517,9 +658,14 @@ class Api:
         for m in self._store.query("SELECT ag.account_id, ag.group_id FROM account_groups ag JOIN accounts a ON a.id = ag.account_id "
                                    "WHERE a.sheet_id=? ORDER BY ag.rowid", (sheet_id,)):
             groups.setdefault(m["account_id"], []).append(m["group_id"])
+        fams = {}
+        for m in self._store.query("SELECT fm.account_id, fm.family_id, fm.role FROM family_members fm JOIN accounts a ON a.id = fm.account_id "
+                                   "WHERE a.sheet_id=? ORDER BY fm.rowid", (sheet_id,)):
+            fams.setdefault(m["account_id"], []).append({"id": m["family_id"], "role": m["role"]})
         for r in rows:
             r["extra"] = json.loads(r["extra"] or "{}")
             r["group_ids"] = groups.get(r["id"], [])
+            r["families"] = fams.get(r["id"], [])
             self._decrypt_row(r)
         return rows
 
@@ -561,6 +707,7 @@ class Api:
         if rows:  # 自建郵箱：先在後台刪除，成功了再刪本地
             self._admin_client(self._admin_cfg()).delete_mailboxes([r["email"] for r in rows.values()])
         self._bulk("DELETE FROM account_groups WHERE account_id IN ({})", ids)
+        self._bulk("DELETE FROM family_members WHERE account_id IN ({})", ids)
         self._bulk("DELETE FROM accounts WHERE id IN ({})", ids)
 
     @need_unlock
@@ -1311,6 +1458,17 @@ class Api:
                 st.conn.execute("DELETE FROM account_groups WHERE account_id=?", (int(r["id"]),))
                 st.conn.executemany("INSERT OR IGNORE INTO account_groups(account_id, group_id) VALUES (?, ?)",
                                     [(int(r["id"]), g) for g in gids])
+                if "families" in r:  # 家庭組關係也恢復（家庭組已被刪除的跳過）
+                    st.conn.execute("DELETE FROM family_members WHERE account_id=?", (int(r["id"]),))
+                    for m in r["families"] or []:
+                        fid = int(m["id"])
+                        if not st.conn.execute("SELECT 1 FROM families WHERE id=?", (fid,)).fetchone():
+                            continue
+                        role = "owner" if m.get("role") == "owner" else "member"
+                        if role == "owner":
+                            st.conn.execute("UPDATE family_members SET role='member' WHERE family_id=? AND role='owner'", (fid,))
+                        st.conn.execute("INSERT OR REPLACE INTO family_members(family_id, account_id, role) VALUES (?, ?, ?)",
+                                        (fid, int(r["id"]), role))
             st.conn.commit()
 
     @need_unlock

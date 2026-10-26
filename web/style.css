@@ -504,3 +504,65 @@ tr:hover .inbox-btn { visibility: visible; }
 .toast { background: var(--toast); color: #fff; padding: 8px 16px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.2); max-width: 70vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast.error { background: var(--danger); }
 .modal-mask.kb-mask { z-index: 55; }
+
+/* ---------- 家庭組 ---------- */
+.fam-icon { width: 12px; flex: none; text-align: center; font-size: 13px; line-height: 1; }
+.side-list .count.over { color: #ff8a8a; opacity: 1; }
+.side-list .side-empty { color: var(--side-muted); font-size: 12px; }
+.fam-cell { flex-wrap: nowrap; overflow: hidden; }
+.fam-tag.owner { font-weight: 600; }
+.fam-pop { width: 340px; max-height: 70vh; overflow-y: auto; }
+.fam-block { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin-bottom: 8px; }
+.fam-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; min-width: 0; }
+.fam-head .muted { font-size: 12px; }
+.fam-member { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 5px; min-width: 0; font-size: 12.5px; }
+.fam-member.me { background: var(--row-sel); }
+.fam-member .copy { flex: 1; min-width: 0; }
+.fam-role { width: 16px; text-align: center; flex: none; }
+.fam-sheet { font-size: 11px; max-width: 90px; flex: none; }
+.fam-notes { font-size: 12px; margin: 4px 0 0; white-space: pre-wrap; }
+.fam-actions { margin-top: 4px; font-size: 12px; }
+.fam-none { padding: 6px 2px; font-size: 12px; }
+.fam-join select { flex: 1; min-width: 0; padding: 3px 6px; }
+.fam-join .link { white-space: nowrap; }
+.fam-create-box { display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 1px dashed var(--line); border-radius: 8px; }
+.fam-create-box label { font-size: 12px; }
+.fam-create-box select { padding: 3px 6px; }
+.fam-bulk { width: 300px; }
+.fam-modal { width: 880px; }
+.fam-layout { display: flex; gap: 14px; min-height: 380px; }
+.fam-list { width: 210px; flex: none; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); padding-right: 10px; overflow-y: auto; max-height: 60vh; }
+.fam-list-item { display: flex; align-items: center; gap: 6px; padding: 6px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.fam-list-item:hover { background: var(--row-hover); }
+.fam-list-item.active { background: var(--primary-soft); }
+.fam-list-name { flex: 1; min-width: 0; }
+.fam-list-tools { display: none; }
+.fam-list-item:hover .fam-list-tools { display: flex; }
+.fam-list-item:hover > .muted { display: none; }
+.fam-new { margin-top: 6px; align-self: flex-start; }
+.fam-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.fam-detail .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); }
+.fam-detail .field input, .fam-detail .field textarea { color: var(--text); font-size: 13px; }
+.fam-detail .field input[type=color] { width: 34px; height: 32px; padding: 2px; flex: none; }
+.fam-form { display: grid; grid-template-columns: 1.3fr 1.2fr .6fr; gap: 10px; }
+.fam-form > *, .fam-form input:not([type=color]) { min-width: 0; width: 100%; }
+.fam-detail textarea { width: 100%; resize: vertical; }
+@media (max-width: 900px) {
+  .fam-list { width: 150px; }
+  .fam-form { grid-template-columns: 1fr 1fr; }
+  .fam-sheet { display: none; }
+}
+.fam-members-head { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.fam-members { border: 1px solid var(--line); border-radius: 8px; max-height: 260px; overflow-y: auto; }
+.fam-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 13px; min-width: 0; }
+.fam-row:last-child { border-bottom: 0; }
+.fam-row.owner { background: color-mix(in srgb, #f5a524 10%, transparent); }
+.fam-row .copy { flex: 1; min-width: 0; }
+.fam-row .link { white-space: nowrap; font-size: 12px; }
+.fam-role-tag { width: 64px; flex: none; font-size: 12px; color: var(--text-2); }
+.fam-row.owner .fam-role-tag { color: #c27c0e; font-weight: 600; }
+.fam-add input { width: 100%; }
+.fam-results { margin-top: 4px; border: 1px solid var(--line); border-radius: 8px; max-height: 200px; overflow-y: auto; }
+.fam-result { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 13px; min-width: 0; }
+.fam-result:hover { background: var(--row-hover); }
+.fam-result .mono { min-width: 0; max-width: 260px; }

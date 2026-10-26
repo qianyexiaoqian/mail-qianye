@@ -81,6 +81,28 @@
       </li>
     </ul>
 
+    <template v-if="!selfmail">
+      <div class="side-title">
+        <span>{{ t('side.families') }}</span>
+        <span>
+          <button class="icon-btn" :title="t('family.new')" @click="famCreate()">＋</button>
+          <button class="icon-btn" :title="t('family.manage')" @click="openFamilies()">⚙</button>
+        </span>
+      </div>
+      <ul class="side-list">
+        <li v-for="f in families" :key="f.id" :class="{active: filters.family === f.id}" @click="toggleFamilyFilter(f.id)"
+            @dblclick="openFamilies(f.id)" :title="(famOwner(f) ? '👑 ' + famOwner(f).email + '\n' : '') + t('family.sideTip')">
+          <span class="fam-icon" :style="{color: f.color}">⌂</span><span class="name">{{ f.name }}</span>
+          <span class="count" :class="{over: famOver(f)}">{{ famCount(f) }}</span>
+          <span class="row-tools"><button class="icon-btn sm" :title="t('family.manage')" @click.stop="openFamilies(f.id)">✎</button></span>
+        </li>
+        <li v-if="families.length" :class="{active: filters.family === 'owner'}" @click="toggleFamilyFilter('owner')">
+          <span class="fam-icon">👑</span><span class="name">{{ t('family.allOwners') }}</span>
+        </li>
+        <li v-if="!families.length" class="side-empty" @click="famCreate()">{{ t('family.emptySide') }}</li>
+      </ul>
+    </template>
+
     <button v-if="!selfmail" class="side-btn side-wide" @click="openSelfmailWindow" :title="t('selfmail.openTip')">📬 {{ t('selfmail.title') }}</button>
     <div class="side-actions">
       <button class="side-btn" @click="lockNow" :title="t('lock.lockTip')">🔒 {{ t('lock.lock') }}</button>
@@ -157,6 +179,9 @@
       <button type="button" class="bulk-pick" :class="{open: pop && pop.kind === 'bulkGroups'}" @mousedown.stop @click="openBulkGroupPop($event)">
         {{ t('bulk.setGroup') }}<span class="ms-arrow">▾</span>
       </button>
+      <button v-if="!selfmail" type="button" class="bulk-pick" :class="{open: pop && pop.kind === 'bulkFamily'}" @mousedown.stop @click="openBulkFamilyPop($event)">
+        {{ t('family.bulk') }}<span class="ms-arrow">▾</span>
+      </button>
       <select @change="bulkStatus($event)">
         <option value="">{{ t('bulk.setStatus') }}</option>
         <option v-for="s in meta.statuses" :value="s">{{ statusLabel(s) }}</option>
@@ -232,6 +257,13 @@
                 <span class="group-cell" :title="accGroupNames(a).join('、') || t('group.clickToSet')" @click="openGroupPop(a, $event)">
                   <span v-for="gid in accGroups(a)" :key="gid" class="tag" :style="tagStyle(groupMap[gid].color)">{{ groupMap[gid].name }}</span>
                   <span v-if="!accGroups(a).length" class="muted add-note">{{ t('group.add1') }}</span>
+                </span>
+              </template>
+              <template v-else-if="c.key === 'family'">
+                <span class="group-cell fam-cell" :title="famText(a) || t('family.clickToSet')" @click="openFamilyPop(a, $event)">
+                  <span v-for="f in accFamilies(a)" :key="f.id" class="tag fam-tag" :class="{owner: f.role === 'owner'}"
+                        :style="tagStyle(familyMap[f.id].color)">{{ f.role === 'owner' ? '👑 ' : '' }}{{ familyMap[f.id].name }}</span>
+                  <span v-if="!accFamilies(a).length" class="muted add-note">{{ t('family.add1') }}</span>
                 </span>
               </template>
               <template v-else-if="c.key === 'status'">
@@ -409,6 +441,62 @@
       <span class="spacer"></span>
       <button class="link" @click="pop = null; openGroups()">⚙ {{ t('group.manage') }}</button>
     </div>
+  </div>
+  <div v-else-if="pop && pop.kind === 'family'" ref="popEl" class="popover fam-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+    <div class="popover-title">{{ t('col.family') }} · {{ pop.account.email }}</div>
+    <div v-for="af in accFamilies(pop.account)" :key="af.id" class="fam-block">
+      <div class="fam-head">
+        <span class="fam-icon" :style="{color: familyMap[af.id].color}">⌂</span>
+        <b class="ellipsis">{{ familyMap[af.id].name }}</b>
+        <span v-if="familyMap[af.id].kind" class="muted ellipsis">{{ familyMap[af.id].kind }}</span>
+        <span class="spacer"></span>
+        <span class="muted" :class="{'danger-text': famOver(familyMap[af.id])}">{{ famCount(familyMap[af.id]) }}</span>
+      </div>
+      <div v-for="m in familyMap[af.id].members" :key="m.account_id" class="fam-member" :class="{me: m.account_id === pop.account.id}">
+        <span class="fam-role" :title="m.role === 'owner' ? t('family.owner') : t('family.member')">{{ m.role === 'owner' ? '👑' : '·' }}</span>
+        <span class="copy mono ellipsis" :title="m.email" @click="copy(m.email, t('copy.email'))">{{ m.email }}</span>
+        <span v-if="famSheetName(m)" class="muted fam-sheet ellipsis">{{ famSheetName(m) }}</span>
+        <button v-if="m.account_id !== pop.account.id" class="icon-btn sm" :title="t('family.goto')" @click="famGoto(m)">➜</button>
+      </div>
+      <div v-if="familyMap[af.id].notes" class="muted fam-notes">{{ familyMap[af.id].notes }}</div>
+      <div class="editor-row fam-actions">
+        <button class="link" @click="famShow(familyMap[af.id])">{{ t('family.showOnly') }}</button>
+        <button v-if="af.role !== 'owner'" class="link" @click="famSetOwner(familyMap[af.id], pop.account.id)">👑 {{ t('family.makeOwner') }}</button>
+        <span class="spacer"></span>
+        <button class="link danger-text" @click="famRemove(familyMap[af.id], pop.account.id)">{{ t('family.leave') }}</button>
+      </div>
+    </div>
+    <div v-if="!accFamilies(pop.account).length" class="muted fam-none">{{ t('family.none') }}</div>
+    <div class="editor-row fam-join">
+      <select v-if="families.some(f => !accFamilies(pop.account).some(x => x.id === f.id))" v-model="pop.join" @change="popJoinFamily">
+        <option value="">{{ t('family.join') }}</option>
+        <option v-for="f in families" v-show="!accFamilies(pop.account).some(x => x.id === f.id)" :key="f.id" :value="f.id">
+          {{ f.name }}（{{ famCount(f) }}）</option>
+      </select>
+      <button class="link" @click="famCreate([], pop.account.id)">＋ {{ t('family.newAsOwner') }}</button>
+    </div>
+    <div class="editor-row" style="margin-top:6px"><button class="link" @click="openFamilies(accFamilies(pop.account)[0]?.id)">⚙ {{ t('family.manage') }}</button></div>
+  </div>
+  <div v-else-if="pop && pop.kind === 'bulkFamily'" ref="popEl" class="popover group-pop fam-bulk" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
+    <div class="popover-title">{{ t('family.bulkTitle', {n: pop.ids.length}) }}</div>
+    <div class="fam-create-box">
+      <label class="muted">{{ t('family.owner') }}</label>
+      <select v-model.number="pop.owner">
+        <option :value="0">{{ t('family.noOwner') }}</option>
+        <option v-for="a in bulkPopAccounts()" :key="a.id" :value="a.id">{{ a.email }}</option>
+      </select>
+      <button class="btn sm primary" :disabled="pop.busy" @click="bulkFamilyCreate">＋ {{ t('family.createFromSel') }}</button>
+    </div>
+    <div v-if="families.length" class="popover-title" style="margin-top:8px">{{ t('family.joinExisting') }}</div>
+    <div class="group-pop-list">
+      <label v-for="f in families" :key="f.id" class="check group-pop-item" :title="t('family.bulkTip')">
+        <input type="checkbox" :disabled="pop.busy" :checked="bulkFamilyCount(f) === pop.ids.length"
+               :indeterminate.prop="bulkFamilyCount(f) > 0 && bulkFamilyCount(f) < pop.ids.length" @change="toggleBulkFamily(f)">
+        <span class="fam-icon" :style="{color: f.color}">⌂</span><span class="group-pop-name">{{ f.name }}</span>
+        <span class="muted group-pop-n" :class="{'danger-text': famOver(f)}">{{ famCount(f) }}</span>
+      </label>
+    </div>
+    <div class="editor-row" style="margin-top:6px"><span class="spacer"></span><button class="link" @click="openFamilies()">⚙ {{ t('family.manage') }}</button></div>
   </div>
   <div v-else-if="pop && pop.kind === 'backup'" ref="popEl" class="popover bc-pop" :style="{left: pop.x + 'px', top: pop.y + 'px'}">
     <div class="popover-title">{{ t('col.backup_codes') }} · {{ pop.account.email }}</div>
@@ -835,6 +923,85 @@
         <span class="muted">{{ t('group.hint') }}</span><span class="spacer"></span>
         <button class="btn" @click="groupEdit = null">{{ t('btn.cancel') }}</button>
         <button class="btn primary" @click="saveGroups">{{ t('btn.save') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 家庭組管理 ========== -->
+  <div v-if="famEdit" class="modal-mask" @mousedown.self="famEdit = null">
+    <div class="modal wide fam-modal">
+      <h3>{{ t('family.manage') }}</h3>
+      <div class="fam-layout">
+        <div class="fam-list">
+          <div v-for="(f, i) in families" :key="f.id" class="fam-list-item" :class="{active: famEdit.id === f.id}" @click="famEdit.id = f.id; famEdit.q = ''; famEdit.results = []">
+            <span class="fam-icon" :style="{color: f.color}">⌂</span>
+            <span class="ellipsis fam-list-name">{{ f.name }}</span>
+            <span class="muted" :class="{'danger-text': famOver(f)}">{{ famCount(f) }}</span>
+            <span class="fam-list-tools">
+              <button class="icon-btn sm" :title="t('columns.up')" :disabled="i === 0" @click.stop="famMove(f, -1)">↑</button>
+              <button class="icon-btn sm" :title="t('columns.down')" :disabled="i === families.length - 1" @click.stop="famMove(f, 1)">↓</button>
+            </span>
+          </div>
+          <button class="btn sm fam-new" @click="famNew">＋ {{ t('family.new') }}</button>
+        </div>
+        <div v-if="famCur" class="fam-detail">
+          <div class="fam-form">
+            <label class="field">{{ t('family.name') }}
+              <span class="editor-row"><input type="color" :value="famCur.color" @change="famSave('color', $event.target.value)">
+              <input :value="famCur.name" @change="famSave('name', $event.target.value)"></span></label>
+            <label class="field">{{ t('family.kind') }}
+              <input :value="famCur.kind" list="fam-kinds" :placeholder="t('family.kindPh')" @change="famSave('kind', $event.target.value)"></label>
+            <label class="field">{{ t('family.max') }}
+              <input type="number" min="0" :value="famCur.max_members" :title="t('family.maxTip')" @change="famSave('max_members', $event.target.value)"></label>
+          </div>
+          <datalist id="fam-kinds"><option v-for="k in familyKinds" :key="k" :value="k"></option></datalist>
+          <label class="field">{{ t('col.notes') }}
+            <textarea rows="2" :value="famCur.notes" :placeholder="t('family.notesPh')" @change="famSave('notes', $event.target.value)"></textarea></label>
+
+          <div class="fam-members-head">
+            <b>{{ t('family.members') }}</b>
+            <span class="muted" :class="{'danger-text': famOver(famCur)}">{{ famCount(famCur) }}<template v-if="famOver(famCur)"> · {{ t('family.over') }}</template></span>
+            <span v-if="!famOwner(famCur) && famCur.members.length" class="danger-text">{{ t('family.noOwnerWarn') }}</span>
+            <span class="spacer"></span>
+            <button class="link" :disabled="!famCur.members.length" @click="famShow(famCur)">{{ t('family.showOnly') }}</button>
+          </div>
+          <div class="fam-members">
+            <div v-for="m in famCur.members" :key="m.account_id" class="fam-row" :class="{owner: m.role === 'owner'}">
+              <span class="fam-role-tag">{{ m.role === 'owner' ? '👑 ' + t('family.owner') : t('family.member') }}</span>
+              <span class="copy mono ellipsis" :title="m.email" @click="copy(m.email, t('copy.email'))">{{ m.email }}</span>
+              <span class="muted ellipsis fam-sheet">{{ famSheetName(m) }}</span>
+              <span class="status" :class="'st-' + statusIndex(m.status)">{{ statusLabel(m.status) }}</span>
+              <button v-if="m.role !== 'owner'" class="link" @click="famSetOwner(famCur, m.account_id)">{{ t('family.makeOwner') }}</button>
+              <button v-else class="link" @click="famSetOwner(famCur, null)">{{ t('family.unsetOwner') }}</button>
+              <button class="icon-btn sm" :title="t('family.goto')" @click="famGoto(m)">➜</button>
+              <button class="icon-btn sm" :title="t('family.remove')" @click="famRemove(famCur, m.account_id)">✕</button>
+            </div>
+            <div v-if="!famCur.members.length" class="muted fam-none">{{ t('family.noMembers') }}</div>
+          </div>
+          <div class="fam-add">
+            <input v-model="famEdit.q" :placeholder="t('family.searchPh')" @input="famSearch" @keydown.enter.prevent="famAdd(famEdit.results[0])">
+            <div v-if="famEdit.results.length" class="fam-results">
+              <div v-for="r in famEdit.results" :key="r.id" class="fam-result">
+                <span class="mono ellipsis">{{ r.email }}</span>
+                <span class="muted ellipsis fam-sheet">{{ famSheetName(r) }}</span>
+                <span v-if="famOtherNames(r)" class="muted ellipsis" :title="t('family.inOther')">⌂ {{ famOtherNames(r) }}</span>
+                <span class="spacer"></span>
+                <template v-if="famCur.members.some(m => m.account_id === r.id)"><span class="muted">{{ t('family.already') }}</span></template>
+                <template v-else>
+                  <button class="btn sm" @click="famAdd(r)">{{ t('family.addMember') }}</button>
+                  <button class="btn sm" @click="famAdd(r, 'owner')">👑 {{ t('family.addOwner') }}</button>
+                </template>
+              </div>
+            </div>
+            <div v-else-if="famEdit.q.trim()" class="muted fam-none">{{ t('family.noResult') }}</div>
+          </div>
+        </div>
+        <div v-else class="fam-detail muted fam-none">{{ t('family.emptyHint') }}</div>
+      </div>
+      <div class="modal-foot">
+        <button v-if="famCur" class="btn danger" @click="famDelete">{{ t('family.delete') }}</button>
+        <span class="muted">{{ t('family.hint') }}</span><span class="spacer"></span>
+        <button class="btn primary" @click="famEdit = null">{{ t('btn.ok') }}</button>
       </div>
     </div>
   </div>

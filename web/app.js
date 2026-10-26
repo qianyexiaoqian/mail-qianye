@@ -110,14 +110,14 @@ function fileToThumb(file, max = 128) {
 
 const BASE_COLUMNS = [
   { key: 'index' }, { key: 'email', sort: true }, { key: 'password' }, { key: 'totp' }, { key: 'backup_codes' }, { key: 'recovery_email', sort: true },
-  { key: 'recovery_password' }, { key: 'phone', sort: true }, { key: 'group', sort: true }, { key: 'status', sort: true },
+  { key: 'recovery_password' }, { key: 'phone', sort: true }, { key: 'group', sort: true }, { key: 'family', sort: true }, { key: 'status', sort: true },
   { key: 'notes', sort: true }, { key: 'updated', sort: true },
 ];
 const DEFAULT_VISIBLE = { index: true, email: true, password: true, totp: true, backup_codes: true, recovery_email: true, recovery_password: false,
-  phone: false, group: true, status: true, notes: true, updated: false };
+  phone: false, group: true, family: true, status: true, notes: true, updated: false };
 // 默認列寬（px），拖動表頭右邊緣可調整，記在 prefs.colWidths
 const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, backup_codes: 96, recovery_email: 230, recovery_password: 140, phone: 140,
-  group: 100, status: 80, notes: 240, updated: 140 };
+  group: 100, family: 160, status: 80, notes: 240, updated: 140 };
 const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, image: 70 };
 const MIN_COL_WIDTH = 50;
 const INBOX_PAGE = 15;  // 收件箱每次刷新取的數量，「加載更多」每次多取 50 封
@@ -125,7 +125,9 @@ const INBOX_MORE = 50;
 // 自建郵箱窗口默認顯示的列：密碼要看，2FA / 輔助郵箱用不上
 const SELFMAIL_VISIBLE = { index: true, email: true, password: true, totp: false, recovery_email: false, recovery_password: false,
   phone: false, group: true, status: true, notes: true, updated: true };
-const DEFAULT_FILTERS = { group: '', status: '', domain: '', twofa: '', recovery: '', country: '' };
+const DEFAULT_FILTERS = { group: '', family: '', status: '', domain: '', twofa: '', recovery: '', country: '' };
+// 家庭組類型（輸入框的候選），人數上限含組長
+const FAMILY_KINDS = ['Google One', 'YouTube Premium', 'Microsoft 365', 'Apple', 'Spotify', 'Netflix', 'ChatGPT Team'];
 const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize: 20, page: 1, scroll: 0, sheetId: null,
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
   colOrders: {}, colWidths: {},  // 列順序按列表分別記（自定義列每個列表不同），_default 是最近一次調整的順序
@@ -163,7 +165,7 @@ const app = createApp({
       ready: false,
       meta: { statuses: [], fields: [], db_path: '' },
       prefs: JSON.parse(JSON.stringify(DEFAULT_PREFS)),
-      sheets: [], groups: [], accounts: [],
+      sheets: [], groups: [], families: [], accounts: [],
       sheetId: null,
       search: '',
       filters: { ...DEFAULT_FILTERS },
@@ -172,7 +174,8 @@ const app = createApp({
       showPwd: false,
       page: 1, pageSize: 20,
       codes: {}, now: Math.floor(Date.now() / 1000), lastWindow: 0,
-      edit: null, editCode: '', imp: null, groupEdit: null, colEdit: null, dialog: null, settings: null,
+      edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null,
+      familyKinds: FAMILY_KINDS,
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
       selfDomains: [], recType: '', recBusy: false, sideDrag: null, sideOver: '',
@@ -191,6 +194,9 @@ const app = createApp({
     appTitle() { return SELFMAIL ? t('selfmail.title') : t('app.title'); },
     dbName() { return (this.meta.db_path || '').split(/[\\/]/).pop(); },
     groupMap() { return Object.fromEntries(this.groups.map(g => [g.id, g])); },
+    familyMap() { return Object.fromEntries(this.families.map(f => [f.id, f])); },
+    // 家庭組管理窗口裡正在看的家庭組
+    famCur() { return (this.famEdit && this.familyMap[this.famEdit.id]) || null; },
     importFields() { return [...this.meta.fields, ...IMPORT_EXTRA_FIELDS, 'skip']; },
     importPresets() {
       return [
@@ -234,7 +240,7 @@ const app = createApp({
 
     // 所有列（含隱藏的）的默認順序
     defaultColumns() {
-      const cols = BASE_COLUMNS.map(c => ({ ...c, label: t('col.' + c.key) }));
+      const cols = BASE_COLUMNS.filter(c => !(SELFMAIL && c.key === 'family')).map(c => ({ ...c, label: t('col.' + c.key) }));
       const custom = this.currentSheet.columns.map(col => ({ key: 'x_' + col.id, label: col.name, custom: true, col, sort: col.type !== 'image' }));
       const i = cols.findIndex(c => c.key === 'notes');  // 自定義列放在備註前面
       if (i >= 0) cols.splice(i, 0, ...custom); else cols.push(...custom);
@@ -273,7 +279,7 @@ const app = createApp({
     },
     hasFilter() {
       const f = this.filters;
-      return !!(f.group || f.status || f.domain || f.twofa || f.recovery || f.country || this.search);
+      return !!(f.group || f.family || f.status || f.domain || f.twofa || f.recovery || f.country || this.search);
     },
     countryColumns() { return this.currentSheet.columns.filter(c => c.type === 'country'); },
     colorColumns() { return this.currentSheet.columns.filter(c => c.type === 'color'); },
@@ -287,6 +293,7 @@ const app = createApp({
       return this.accounts.filter(a => {
         if (countryOn && !this.countryColumns.some(c => countrySet.has(a.extra?.[c.id]))) return false;
         if (f.group === 'none' ? this.accGroups(a).length : (f.group && !this.accGroups(a).includes(f.group))) return false;
+        if (f.family && !this.familyMatch(a, f.family)) return false;
         if (f.status && a.status !== f.status) return false;
         if (f.domain && domainOf(a.email) !== f.domain) return false;
         if (f.twofa && (f.twofa === 'yes') !== !!a.totp_secret) return false;
@@ -295,7 +302,13 @@ const app = createApp({
       });
     },
 
-    sorted() { return this.sortList(this.filtered); },
+    sorted() {
+      const list = this.sortList(this.filtered);
+      const fid = this.filters.family;
+      if (this.sort.key || typeof fid !== 'number') return list;
+      const rank = a => (this.accFamilies(a).find(x => x.id === fid)?.role === 'owner' ? 0 : 1);
+      return [...list].sort((x, y) => rank(x) - rank(y));  // 看某個家庭組時組長排第一
+    },
 
     pageCount() { return Math.max(1, Math.ceil(this.sorted.length / this.pageSize)); },
     paged() { return this.sorted.slice((this.page - 1) * this.pageSize, this.page * this.pageSize); },
@@ -631,12 +644,14 @@ const app = createApp({
       const st = await call('get_state');
       this.sheets = st.sheets;
       this.groups = st.groups;
+      this.families = st.families || [];
       if (SELFMAIL && !this.visibleSheets.length) {  // 第一次打開：建好自建郵箱列表
         await call('selfmail_sheet');
         await this.refreshState();
       }
       if (!this.visibleSheets.some(s => s.id === this.sheetId)) this.sheetId = this.visibleSheets[0]?.id;
       if (typeof this.filters.group === 'number' && !this.groupMap[this.filters.group]) this.filters.group = '';
+      if (typeof this.filters.family === 'number' && !this.familyMap[this.filters.family]) this.filters.family = '';
       await this.loadAccounts();
       if (SELFMAIL && !this._synced) { this._synced = true; this.selfmailSync(true); }  // 打開窗口時自動同步一次
       if (!this._agentInited) { this._agentInited = true; this.agentInit(); }  // 恢復 AI 助手上次的對話
@@ -659,6 +674,7 @@ const app = createApp({
       const st = await call('get_state');
       this.sheets = st.sheets;
       this.groups = st.groups;
+      this.families = st.families || [];
     },
     async refreshCodes() {
       const secrets = [...new Set(this.accounts.map(a => a.totp_secret).filter(Boolean))];
@@ -691,6 +707,10 @@ const app = createApp({
       if (!key) return list;
       const val = a => {
         if (key === 'group') return this.accGroupNames(a).join(', ').toLowerCase();
+        if (key === 'family') {  // 同一家庭組的排在一起，組長在前；沒有家庭組的排最後
+          const f = this.accFamilies(a)[0];
+          return f ? this.familyMap[f.id].name.toLowerCase() + '\u0001' + (f.role === 'owner' ? 0 : 1) : '\uffff';
+        }
         if (key === 'updated') return a.updated_at;
         if (key === 'status') return this.statusIndex(a.status);
         if (key.startsWith('x_')) return String(a.extra[key.slice(2)] || '').toLowerCase();
@@ -702,7 +722,7 @@ const app = createApp({
       });
     },
     searchFields(a) {
-      const out = [a.email, a.recovery_email, a.phone, a.notes, this.accGroupNames(a).join(' '), this.statusLabel(a.status)];
+      const out = [a.email, a.recovery_email, a.phone, a.notes, this.accGroupNames(a).join(' '), this.accFamilyNames(a).join(' '), this.statusLabel(a.status)];
       for (const col of this.currentSheet.columns) {
         const v = a.extra?.[col.id];
         if (!v || col.type === 'image' || col.type === 'color') continue;
@@ -936,6 +956,171 @@ const app = createApp({
         a.group_id = a.group_ids[0] || null;
         this.refreshState();
       } catch (err) { this.toast(errText(err), 'error'); }
+    },
+
+    // ---------- 家庭組（關係）：一個組長 + 若干成員；成員可以在別的列表，一個郵箱可以在多個家庭組 ----------
+    accFamilies(a) { return (a?.families || []).filter(f => this.familyMap[f.id]); },
+    accFamilyNames(a) { return this.accFamilies(a).map(f => this.familyMap[f.id].name); },
+    famText(a) { return this.accFamilies(a).map(f => this.familyMap[f.id].name + (f.role === 'owner' ? `(${t('family.owner')})` : '')).join(' / '); },
+    // 篩選：家庭組 id / owner = 所有組長 / none = 沒有加入家庭組
+    familyMatch(a, v) {
+      const fs = this.accFamilies(a);
+      if (v === 'none') return !fs.length;
+      if (v === 'owner') return fs.some(f => f.role === 'owner');
+      return fs.some(f => f.id === v);
+    },
+    famOwner(f) { return f?.members.find(m => m.role === 'owner') || null; },
+    famOver(f, adding = 0) { return f.max_members > 0 && f.members.length + adding > f.max_members; },
+    famCount(f) { return f.max_members ? `${f.members.length}/${f.max_members}` : String(f.members.length); },
+    famSheetName(m) {
+      if (m.sheet_id === this.sheetId) return '';
+      const s = this.sheets.find(x => x.id === m.sheet_id);
+      return s ? this.sheetName(s) : '';
+    },
+    toggleFamilyFilter(v) { this.filters.family = this.filters.family === v ? '' : v; },
+    async afterFamily(msg) {
+      await this.refreshState();
+      await this.loadAccounts();
+      if (this.pop?.account) this.pop.account = this.accounts.find(x => x.id === this.pop.account.id) || this.pop.account;
+      if (msg) this.toast(msg);
+    },
+    // 加入前檢查人數上限（含組長），超出時讓用戶確認
+    async famCheckLimit(f, adding) {
+      if (!this.famOver(f, adding)) return true;
+      return this.confirm(t('family.fullTitle'), t('family.fullConfirm', { name: f.name, n: f.members.length + adding, max: f.max_members }),
+        t('btn.ok'), false);
+    },
+    async famRun(fn, msg) {
+      try { await fn(); await this.afterFamily(msg); } catch (e) { this.toast(errText(e), 'error'); }
+    },
+    // 新建家庭組：ownerId = 組長，ids = 成員（含組長也沒關係）
+    async famCreate(ids = [], ownerId = null) {
+      const owner = this.accounts.find(x => x.id === ownerId);
+      const name = await this.prompt(t('family.new'), t('family.namePrompt'),
+        owner ? t('family.defaultName', { s: owner.email.split('@')[0] }) : t('family.newName'));
+      if (!name) return null;
+      let fid = null;
+      await this.famRun(async () => { fid = await call('add_family', { name, max_members: 6, color: this.randomColor() }, ownerId || null, ids); },
+        t('family.created'));
+      return fid;
+    },
+
+    // 表格「家庭組」列：點擊查看這個郵箱所在的家庭組（組長 + 成員）
+    openFamilyPop(a, e) {
+      const r = e.currentTarget.getBoundingClientRect();
+      const n = this.accFamilies(a).reduce((s, f) => s + this.familyMap[f.id].members.length + 2, 0);
+      const w = 340, h = Math.min(window.innerHeight * 0.7, 110 + n * 28);
+      const x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+      const y = r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+      this.pop = { kind: 'family', account: a, x, y, join: '' };
+    },
+    async popJoinFamily() {
+      const a = this.pop.account, f = this.familyMap[Number(this.pop.join)];
+      this.pop.join = '';
+      if (!f || !(await this.famCheckLimit(f, 1))) return;
+      await this.famRun(() => call('family_add', f.id, [a.id]), t('family.joined', { s: f.name }));
+    },
+    famSetOwner(f, accountId) { return this.famRun(() => call('family_set_owner', f.id, accountId), t('family.updated')); },
+    famRemove(f, accountId) { return this.famRun(() => call('family_remove', f.id, [accountId]), t('family.updated')); },
+    // 定位成員：切到它所在的列表並搜索它
+    famGoto(m) {
+      this.famEdit = null;
+      this.pop = null;
+      if (m.sheet_id !== this.sheetId) this.selectSheet(m.sheet_id);
+      this.filters.family = '';
+      this.search = m.email;
+    },
+    famShow(f) {
+      this.famEdit = null;
+      this.pop = null;
+      this.search = '';
+      this.filters.family = f.id;
+      const other = f.members.filter(m => m.sheet_id !== this.sheetId).length;
+      if (other) this.toast(t('family.otherSheets', { n: other }));
+    },
+
+    // 家庭組管理窗口
+    openFamilies(fid) {
+      this.pop = null;
+      this.famEdit = { id: fid || this.families[0]?.id || null, q: '', results: [] };
+    },
+    async famNew() {
+      const fid = await this.famCreate();
+      if (fid && this.famEdit) this.famEdit.id = fid;
+    },
+    famSave(field, value) {
+      const f = this.famCur;
+      if (!f) return;
+      if (field === 'max_members') value = Math.max(0, parseInt(value, 10) || 0);
+      if (field === 'name' && !String(value).trim()) return;
+      return this.famRun(() => call('update_family', f.id, { [field]: value }));
+    },
+    async famDelete() {
+      const f = this.famCur;
+      if (!f || !(await this.confirm(t('family.delete'), t('family.deleteConfirm', { name: f.name, n: f.members.length })))) return;
+      await this.famRun(() => call('delete_family', f.id), t('family.deleted'));
+      if (this.filters.family === f.id) this.filters.family = '';
+      if (this.famEdit) this.famEdit.id = this.families[0]?.id || null;
+    },
+    famMove(f, d) {
+      const ids = this.families.map(x => x.id);
+      const i = ids.indexOf(f.id), j = i + d;
+      if (j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      return this.famRun(() => call('reorder', 'families', ids));
+    },
+    // 添加成員：按郵箱在所有列表裡查找
+    famSearch() {
+      clearTimeout(this._famTimer);
+      const q = this.famEdit.q.trim();
+      if (!q) { this.famEdit.results = []; return; }
+      this._famTimer = setTimeout(async () => {
+        const r = await call('find_accounts', q, 20).catch(() => []);
+        if (this.famEdit && this.famEdit.q.trim() === q) this.famEdit.results = r;
+      }, 200);
+    },
+    async famAdd(acc, role = 'member') {
+      const f = this.famCur;
+      if (!f || !acc) return;
+      if (role !== 'owner' && f.members.some(m => m.account_id === acc.id)) return this.toast(t('family.already'), 'error');
+      if (!f.members.some(m => m.account_id === acc.id) && !(await this.famCheckLimit(f, 1))) return;
+      await this.famRun(() => call('family_add', f.id, [acc.id], role), t('family.added', { s: acc.email }));
+      if (this.famEdit) Object.assign(this.famEdit, { q: '', results: [] });
+    },
+    famOtherNames(acc) {
+      return (acc.families || []).filter(x => x.id !== this.famEdit?.id && this.familyMap[x.id])
+        .map(x => this.familyMap[x.id].name + (x.role === 'owner' ? ' 👑' : '')).join('、');
+    },
+
+    // 批量：選中的郵箱加入 / 移出家庭組，或用它們新建一個
+    openBulkFamilyPop(e) {
+      if (this.pop?.kind === 'bulkFamily') { this.pop = null; return; }
+      const r = e.currentTarget.getBoundingClientRect();
+      const w = 300, h = Math.min(420, 170 + this.families.length * 32);
+      const x = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+      const y = r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+      const ids = [...this.selectedIds];
+      this.pop = { kind: 'bulkFamily', ids, owner: ids[0] || 0, x, y, busy: false };
+    },
+    bulkFamilyCount(f) {
+      const ids = new Set(this.pop?.ids || []);
+      return f.members.filter(m => ids.has(m.account_id)).length;
+    },
+    bulkPopAccounts() {
+      const ids = new Set(this.pop?.ids || []);
+      return this.accounts.filter(a => ids.has(a.id));
+    },
+    async toggleBulkFamily(f) {
+      const pop = this.pop, n = this.bulkFamilyCount(f), all = n === pop.ids.length;
+      if (!all && !(await this.famCheckLimit(f, pop.ids.length - n))) return;
+      pop.busy = true;
+      await this.famRun(() => call(all ? 'family_remove' : 'family_add', f.id, pop.ids), t('family.updated'));
+      pop.busy = false;
+    },
+    async bulkFamilyCreate() {
+      const { ids, owner } = this.pop;
+      const fid = await this.famCreate(ids, owner || null);
+      if (fid) this.openFamilies(fid);
     },
 
     // ---------- 備用碼（一次性驗證碼，一行一個，已用的前面有「~」） ----------
@@ -1254,8 +1439,8 @@ const app = createApp({
       if (fmt === 'txt') return rows.map(rowText).join('\n');
       const cols = this.currentSheet.columns.filter(c => c.type !== 'image');
       const esc = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
-      const head = [...this.meta.fields.map(f => t('col.' + f)), t('col.group'), t('col.status'), ...cols.map(c => c.name)];
-      const lines = rows.map(a => [...this.meta.fields.map(f => a[f]), this.accGroupNames(a).join(' / '), this.statusLabel(a.status),
+      const head = [...this.meta.fields.map(f => t('col.' + f)), t('col.group'), t('col.family'), t('col.status'), ...cols.map(c => c.name)];
+      const lines = rows.map(a => [...this.meta.fields.map(f => a[f]), this.accGroupNames(a).join(' / '), this.famText(a), this.statusLabel(a.status),
         ...cols.map(c => a.extra[c.id] || '')]);
       return '﻿' + [head, ...lines].map(r => r.map(esc).join(',')).join('\r\n');  // BOM 讓 Excel 正確識別 UTF-8
     },
@@ -1333,6 +1518,7 @@ const app = createApp({
         else if (this.edit) this.edit = null;
         else if (this.imp) this.closeImport();
         else if (this.groupEdit) this.groupEdit = null;
+        else if (this.famEdit) this.famEdit = null;
         else if (this.colEdit) this.colEdit = null;
         else if (this.settings) this.settings = null;
         else if (this.search) this.search = '';
