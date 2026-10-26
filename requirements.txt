@@ -1,0 +1,4 @@
+pywebview>=6.2
+cryptography>=44
+pyotp>=2.9
+truststore>=0.10
