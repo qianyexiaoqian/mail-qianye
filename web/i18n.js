@@ -386,6 +386,9 @@ const I18N = {
     'hist.f.status': "狀態",
     'hist.noMatch': "沒有符合條件的記錄",
     'family.iconsSetting': "郵箱前顯示家庭組圖標（{o} 組長 / {m} 成員）",
+    'family.iconsShow': "郵箱前顯示家庭組圖標",
+    'family.iconStyle': "圖標樣式",
+    'family.recommended': "推薦",
   },
 
   'zh-Hans': {
@@ -774,6 +777,9 @@ const I18N = {
     'hist.f.status': "状态",
     'hist.noMatch': "没有符合条件的记录",
     'family.iconsSetting': "邮箱前显示家庭组图标（{o} 组长 / {m} 成员）",
+    'family.iconsShow': "邮箱前显示家庭组图标",
+    'family.iconStyle': "图标样式",
+    'family.recommended': "推荐",
   },
 
   en: {
@@ -1162,6 +1168,9 @@ const I18N = {
     'hist.f.status': "Status",
     'hist.noMatch': "No matching entries",
     'family.iconsSetting': "Show family icons before emails ({o} owner / {m} member)",
+    'family.iconsShow': "Show family icons before emails",
+    'family.iconStyle': "Icon style",
+    'family.recommended': "recommended",
   },
 
   ja: {
@@ -1550,6 +1559,9 @@ const I18N = {
     'hist.f.status': "状態",
     'hist.noMatch': "条件に合う履歴はありません",
     'family.iconsSetting': "メールの前にファミリーのアイコンを表示（{o} 管理者 / {m} メンバー）",
+    'family.iconsShow': "メールの前にファミリーのアイコンを表示",
+    'family.iconStyle': "アイコンのスタイル",
+    'family.recommended': "おすすめ",
   },
 };
 

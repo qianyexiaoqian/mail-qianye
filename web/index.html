@@ -1303,7 +1303,13 @@ X-API-Token: &lt;API_KEY&gt;
             <option :value="60">{{ t('autolock.hour') }}</option>
           </select>
         </label>
-        <label v-if="!selfmail" class="full check"><input type="checkbox" v-model="prefs.familyIcons"> {{ t('family.iconsSetting', {o: familyIcons.owner, m: familyIcons.member}) }}</label>
+        <div v-if="!selfmail" class="full fam-icon-setting">
+          <label class="check"><input type="checkbox" v-model="prefs.familyIcons"> {{ t('family.iconsShow') }}</label>
+          <select v-model="prefs.familyIconSet" :disabled="!prefs.familyIcons" :title="t('family.iconStyle')">
+            <option v-for="(set, key) in familyIconSets" :key="key" :value="key">
+              {{ set.owner }} {{ t('family.owner') }} / {{ set.member }} {{ t('family.member') }}{{ key === 'crown' ? '（' + t('family.recommended') + '）' : '' }}</option>
+          </select>
+        </div>
       </div>
       <div class="section-title">{{ t('admin.section') }}</div>
       <div v-if="settings.mail" class="form-grid">

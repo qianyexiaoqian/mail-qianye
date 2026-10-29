@@ -685,3 +685,6 @@ tr:hover .inbox-btn { visibility: visible; }
 .fam-badge { cursor: pointer; margin-right: 4px; font-size: 14px; line-height: 1; letter-spacing: 1px; }
 .fam-role { width: auto; min-width: 18px; }
 .fam-role-tag { width: 84px; }
+.fam-icon-setting { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--text); }
+.fam-icon-setting .check { display: flex; align-items: center; gap: 6px; }
+.fam-icon-setting select { padding: 4px 8px; }

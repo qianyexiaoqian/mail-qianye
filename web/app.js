@@ -137,9 +137,14 @@ const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize:
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
   colOrders: {}, colWidths: {},  // 列順序按列表分別記（自定義列每個列表不同），_default 是最近一次調整的順序
   importMode: 'smart', importOrder: ['email', 'password', 'totp_secret', 'recovery_email', 'skip', 'skip'],
-  mailAuto: true, mailAutoCopy: false, agentAuto: false, agentSecrets: false, familyIcons: true };
+  mailAuto: true, mailAutoCopy: false, agentAuto: false, agentSecrets: false, familyIcons: true, familyIconSet: 'crown' };
 // 家庭組角色圖標：表格裡郵箱前面、家庭組列表裡都用它們
-const FAMILY_ICONS = { owner: '👨🏻‍🎓', member: '👨🏻‍🏫' };
+// 可選的幾套（設置裡切換）：默認皇冠 + 人像，形狀和顏色都不同，表格裡一眼能分清
+const FAMILY_ICON_SETS = {
+  crown: { owner: '👑', member: '👤' },
+  medal: { owner: '🥇', member: '🥈' },
+  cap: { owner: '👨🏻‍🎓', member: '👨🏻‍🏫' },
+};
 // 常用的 OpenAI 兼容服務，設置裡一鍵填入
 const AI_PRESETS = [
   { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
@@ -183,7 +188,7 @@ const app = createApp({
       codes: {}, now: Math.floor(Date.now() / 1000), lastWindow: 0,
       edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null, apiPage: null, histPage: null,
       apiDocs: API_DOCS, apiDocCats: API_DOC_CATS, apiStatusCodes: API_STATUS_CODES,
-      familyKinds: FAMILY_KINDS, familyIcons: FAMILY_ICONS, gotoInput: '',
+      familyKinds: FAMILY_KINDS, familyIconSets: FAMILY_ICON_SETS, gotoInput: '',
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
       selfDomains: [], recType: '', recBusy: false, sideDrag: null, sideOver: '',
@@ -203,6 +208,7 @@ const app = createApp({
     dbName() { return (this.meta.db_path || '').split(/[\\/]/).pop(); },
     groupMap() { return Object.fromEntries(this.groups.map(g => [g.id, g])); },
     familyMap() { return Object.fromEntries(this.families.map(f => [f.id, f])); },
+    familyIcons() { return FAMILY_ICON_SETS[this.prefs.familyIconSet] || FAMILY_ICON_SETS.crown; },
     // 家庭組管理窗口裡正在看的家庭組
     famCur() { return (this.famEdit && this.familyMap[this.famEdit.id]) || null; },
     importFields() { return [...this.meta.fields, ...IMPORT_EXTRA_FIELDS, 'skip']; },
@@ -1153,10 +1159,10 @@ const app = createApp({
     // 郵箱前面的家庭組圖標：組長 / 成員（同時是兩種就都顯示）
     famIcons(a) {
       const roles = new Set(this.accFamilies(a).map(f => f.role));
-      return ['owner', 'member'].filter(r => roles.has(r)).map(r => FAMILY_ICONS[r]).join('');
+      return ['owner', 'member'].filter(r => roles.has(r)).map(r => this.familyIcons[r]).join('');
     },
     famIconTitle(a) {
-      return this.accFamilies(a).map(f => `${FAMILY_ICONS[f.role]} ${this.familyMap[f.id].name}（${t(f.role === 'owner' ? 'family.owner' : 'family.member')}）`).join('\n');
+      return this.accFamilies(a).map(f => `${this.familyIcons[f.role]} ${this.familyMap[f.id].name}（${t(f.role === 'owner' ? 'family.owner' : 'family.member')}）`).join('\n');
     },
     famOver(f, adding = 0) { return f.max_members > 0 && f.members.length + adding > f.max_members; },
     famCount(f) { return f.max_members ? `${f.members.length}/${f.max_members}` : String(f.members.length); },
@@ -1306,7 +1312,7 @@ const app = createApp({
     },
     famOtherNames(acc) {
       return (acc.families || []).filter(x => x.id !== this.famEdit?.id && this.familyMap[x.id])
-        .map(x => this.familyMap[x.id].name + ' ' + FAMILY_ICONS[x.role]).join('、');
+        .map(x => this.familyMap[x.id].name + ' ' + this.familyIcons[x.role]).join('、');
     },
 
     // 批量：選中的郵箱加入 / 移出家庭組，或用它們新建一個
