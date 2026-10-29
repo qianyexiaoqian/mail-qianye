@@ -682,3 +682,6 @@ tr:hover .inbox-btn { visibility: visible; }
 .hist-badge.sync { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); }
 .hist-tag { display: inline-block; margin-left: 4px; font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--st1-bg, var(--panel-2)); color: var(--st1, var(--text-2)); }
 .side-actions .side-btn { padding-left: 2px; padding-right: 2px; }
+.fam-badge { cursor: pointer; margin-right: 4px; font-size: 14px; line-height: 1; letter-spacing: 1px; }
+.fam-role { width: auto; min-width: 18px; }
+.fam-role-tag { width: 84px; }

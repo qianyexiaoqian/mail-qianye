@@ -890,7 +890,7 @@ ${learned ? '\n' + learned + '\n' : ''}
           case 'export_accounts': return t('agent.confirm.exportTo', { n: this.agentRows(args.filter).length }) + '\n' + args.path;
           case 'manage_families': {
             if (args.action === 'delete') return t('agent.confirm.deleteFamily', { s: args.name });
-            const who = [args.owner ? '👑 ' + args.owner : '', ...(args.members || []), args.filter ? t('agent.confirm.byFilter', { n: this.agentRows(args.filter).length }) : '']
+            const who = [args.owner ? FAMILY_ICONS.owner + ' ' + args.owner : '', ...(args.members || []), args.filter ? t('agent.confirm.byFilter', { n: this.agentRows(args.filter).length }) : '']
               .filter(Boolean);
             const info = [[t('family.name'), args.new_name], [t('family.kind'), args.kind], [t('family.max'), args.max_members], [t('col.notes'), args.notes]]
               .filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k} = ${v}`).join('，');

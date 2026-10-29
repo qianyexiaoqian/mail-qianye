@@ -137,7 +137,9 @@ const DEFAULT_PREFS = { theme: 'light', lang: 'zh-Hant', autoLock: 15, pageSize:
   filters: { ...DEFAULT_FILTERS }, sort: { key: '', dir: 1 }, visible: { ...DEFAULT_VISIBLE },
   colOrders: {}, colWidths: {},  // 列順序按列表分別記（自定義列每個列表不同），_default 是最近一次調整的順序
   importMode: 'smart', importOrder: ['email', 'password', 'totp_secret', 'recovery_email', 'skip', 'skip'],
-  mailAuto: true, mailAutoCopy: false, agentAuto: false, agentSecrets: false };
+  mailAuto: true, mailAutoCopy: false, agentAuto: false, agentSecrets: false, familyIcons: true };
+// 家庭組角色圖標：表格裡郵箱前面、家庭組列表裡都用它們
+const FAMILY_ICONS = { owner: '👨🏻‍🎓', member: '👨🏻‍🏫' };
 // 常用的 OpenAI 兼容服務，設置裡一鍵填入
 const AI_PRESETS = [
   { name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
@@ -181,7 +183,7 @@ const app = createApp({
       codes: {}, now: Math.floor(Date.now() / 1000), lastWindow: 0,
       edit: null, editCode: '', imp: null, groupEdit: null, famEdit: null, colEdit: null, dialog: null, settings: null, apiPage: null, histPage: null,
       apiDocs: API_DOCS, apiDocCats: API_DOC_CATS, apiStatusCodes: API_STATUS_CODES,
-      familyKinds: FAMILY_KINDS,
+      familyKinds: FAMILY_KINDS, familyIcons: FAMILY_ICONS, gotoInput: '',
       pop: null, bulkCol: null, inbox: null, mailCfg: null,
       exportMenu: false, toasts: [], dragCol: '', dragOver: '', aiPresets: AI_PRESETS,
       selfDomains: [], recType: '', recBusy: false, sideDrag: null, sideOver: '',
@@ -1148,6 +1150,14 @@ const app = createApp({
       return fs.some(f => f.id === v);
     },
     famOwner(f) { return f?.members.find(m => m.role === 'owner') || null; },
+    // 郵箱前面的家庭組圖標：組長 / 成員（同時是兩種就都顯示）
+    famIcons(a) {
+      const roles = new Set(this.accFamilies(a).map(f => f.role));
+      return ['owner', 'member'].filter(r => roles.has(r)).map(r => FAMILY_ICONS[r]).join('');
+    },
+    famIconTitle(a) {
+      return this.accFamilies(a).map(f => `${FAMILY_ICONS[f.role]} ${this.familyMap[f.id].name}（${t(f.role === 'owner' ? 'family.owner' : 'family.member')}）`).join('\n');
+    },
     famOver(f, adding = 0) { return f.max_members > 0 && f.members.length + adding > f.max_members; },
     famCount(f) { return f.max_members ? `${f.members.length}/${f.max_members}` : String(f.members.length); },
     famSheetName(m) {
@@ -1201,18 +1211,18 @@ const app = createApp({
     famSetOwner(f, accountId) { return this.famRun(() => call('family_set_owner', f.id, accountId), t('family.updated')); },
     famRemove(f, accountId) { return this.famRun(() => call('family_remove', f.id, [accountId]), t('family.updated')); },
     // 定位成員：切到它所在的列表並搜索它
-    famGoto(m) {
-      this.famEdit = null;
+    async famGoto(m) {
+      await this.famClose();
       this.pop = null;
       if (m.sheet_id !== this.sheetId) this.selectSheet(m.sheet_id);
-      this.filters.family = '';
+      this.filters = { ...DEFAULT_FILTERS };  // 分組回到「全部」，其他篩選也清掉，否則可能被篩掉看不到
       this.search = m.email;
     },
-    famShow(f) {
-      this.famEdit = null;
+    async famShow(f) {
+      await this.famClose();
       this.pop = null;
       this.search = '';
-      this.filters.family = f.id;
+      this.filters = { ...DEFAULT_FILTERS, family: f.id };
       const other = f.members.filter(m => m.sheet_id !== this.sheetId).length;
       if (other) this.toast(t('family.otherSheets', { n: other }));
     },
@@ -1220,25 +1230,54 @@ const app = createApp({
     // 家庭組管理窗口
     openFamilies(fid) {
       this.pop = null;
-      this.famEdit = { id: fid || this.families[0]?.id || null, q: '', results: [] };
+      this.famEdit = { id: fid || this.families[0]?.id || null, q: '', results: [], draft: null };
+      this.famLoadDraft();
+    },
+    // 名稱、類型、人數上限、備註、顏色在草稿裡編輯，離開輸入框時保存
+    famLoadDraft() {
+      const f = this.famCur;
+      if (this.famEdit) this.famEdit.draft = f ? { name: f.name, kind: f.kind, max_members: f.max_members, notes: f.notes, color: f.color } : null;
+    },
+    famDraftChanges() {
+      const f = this.famCur, d = this.famEdit?.draft;
+      if (!f || !d) return {};
+      const out = {};
+      for (const k of Object.keys(d)) {
+        let v = d[k];
+        if (k === 'max_members') v = Math.max(0, parseInt(v, 10) || 0);
+        if (k === 'name' && !String(v).trim()) continue;
+        if (String(v ?? '') !== String(f[k] ?? '')) out[k] = v;
+      }
+      return out;
+    },
+    async famSaveDraft() {
+      const f = this.famCur, changes = this.famDraftChanges();
+      if (!f || !Object.keys(changes).length) return;
+      await this.famRun(() => call('update_family', f.id, changes));
+    },
+    // 關閉 / 切換前先保存還沒離開輸入框的改動
+    async famClose() {
+      if (!this.famEdit) return;
+      await this.famSaveDraft();
+      this.famEdit = null;
+    },
+    async famSelect(id) {
+      await this.famSaveDraft();
+      Object.assign(this.famEdit, { id, q: '', results: [] });
+      this.famLoadDraft();
     },
     async famNew() {
+      await this.famSaveDraft();
       const fid = await this.famCreate();
-      if (fid && this.famEdit) this.famEdit.id = fid;
+      if (fid && this.famEdit) { this.famEdit.id = fid; this.famLoadDraft(); }
     },
-    famSave(field, value) {
-      const f = this.famCur;
-      if (!f) return;
-      if (field === 'max_members') value = Math.max(0, parseInt(value, 10) || 0);
-      if (field === 'name' && !String(value).trim()) return;
-      return this.famRun(() => call('update_family', f.id, { [field]: value }));
-    },
+    famSave() { return this.famSaveDraft(); },
     async famDelete() {
       const f = this.famCur;
       if (!f || !(await this.confirm(t('family.delete'), t('family.deleteConfirm', { name: f.name, n: f.members.length })))) return;
       await this.famRun(() => call('delete_family', f.id), t('family.deleted'));
       if (this.filters.family === f.id) this.filters.family = '';
-      if (this.famEdit) this.famEdit.id = this.families[0]?.id || null;
+      if (this.famEdit) { this.famEdit.id = this.families[0]?.id || null; this.famLoadDraft(); }
     },
     famMove(f, d) {
       const ids = this.families.map(x => x.id);
@@ -1267,7 +1306,7 @@ const app = createApp({
     },
     famOtherNames(acc) {
       return (acc.families || []).filter(x => x.id !== this.famEdit?.id && this.familyMap[x.id])
-        .map(x => this.familyMap[x.id].name + (x.role === 'owner' ? ' 👑' : '')).join('、');
+        .map(x => this.familyMap[x.id].name + ' ' + FAMILY_ICONS[x.role]).join('、');
     },
 
     // 批量：選中的郵箱加入 / 移出家庭組，或用它們新建一個
@@ -1648,10 +1687,10 @@ const app = createApp({
       else if (this.sort.dir === 1) this.sort.dir = -1;
       else this.sort = { key: '', dir: 1 };
     },
-    gotoPage(e) {
-      const n = parseInt(e.target.value, 10);
+    gotoPage() {
+      const n = parseInt(this.gotoInput, 10);
       if (n >= 1) this.page = Math.min(n, this.pageCount);
-      e.target.value = this.page;
+      this.gotoInput = '';
     },
 
     // ---------- 複製 ----------
@@ -1698,7 +1737,7 @@ const app = createApp({
         else if (this.edit) this.edit = null;
         else if (this.imp) this.closeImport();
         else if (this.groupEdit) this.groupEdit = null;
-        else if (this.famEdit) this.famEdit = null;
+        else if (this.famEdit) this.famClose();
         else if (this.colEdit) this.colEdit = null;
         else if (this.settings) this.settings = null;
         else if (this.search) this.search = '';

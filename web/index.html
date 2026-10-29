@@ -92,13 +92,13 @@
       </div>
       <ul class="side-list">
         <li v-for="f in families" :key="f.id" :class="{active: filters.family === f.id}" @click="toggleFamilyFilter(f.id)"
-            @dblclick="openFamilies(f.id)" :title="(famOwner(f) ? '👑 ' + famOwner(f).email + '\n' : '') + t('family.sideTip')">
+            @dblclick="openFamilies(f.id)" :title="(famOwner(f) ? familyIcons.owner + ' ' + famOwner(f).email + '\n' : '') + t('family.sideTip')">
           <span class="fam-icon" :style="{color: f.color}">⌂</span><span class="name">{{ f.name }}</span>
           <span class="count" :class="{over: famOver(f)}">{{ famCount(f) }}</span>
           <span class="row-tools"><button class="icon-btn sm" :title="t('family.manage')" @click.stop="openFamilies(f.id)">✎</button></span>
         </li>
         <li v-if="families.length" :class="{active: filters.family === 'owner'}" @click="toggleFamilyFilter('owner')">
-          <span class="fam-icon">👑</span><span class="name">{{ t('family.allOwners') }}</span>
+          <span class="fam-icon">{{ familyIcons.owner }}</span><span class="name">{{ t('family.allOwners') }}</span>
         </li>
         <li v-if="!families.length" class="side-empty" @click="famCreate()">{{ t('family.emptySide') }}</li>
       </ul>
@@ -234,6 +234,7 @@
                 <span class="muted row-index">{{ (page - 1) * pageSize + ri + 1 }}</span>
               </template>
               <template v-else-if="c.key === 'email'">
+                <span v-if="prefs.familyIcons && !selfmail && famIcons(a)" class="fam-badge" :title="famIconTitle(a)" @click="openFamilyPop(a, $event)">{{ famIcons(a) }}</span>
                 <span class="copy mono" :title="a.email" @click="copy(a.email, t('copy.email'))">{{ a.email }}</span>
                 <button v-if="mailEligible(a, 'email')" class="icon-btn sm inbox-btn" :title="t('mail.open')" @click="openInbox(a, 'email')">📥</button>
               </template>
@@ -265,7 +266,7 @@
               <template v-else-if="c.key === 'family'">
                 <span class="group-cell fam-cell" :title="famText(a) || t('family.clickToSet')" @click="openFamilyPop(a, $event)">
                   <span v-for="f in accFamilies(a)" :key="f.id" class="tag fam-tag" :class="{owner: f.role === 'owner'}"
-                        :style="tagStyle(familyMap[f.id].color)">{{ f.role === 'owner' ? '👑 ' : '' }}{{ familyMap[f.id].name }}</span>
+                        :style="tagStyle(familyMap[f.id].color)">{{ familyIcons[f.role] }} {{ familyMap[f.id].name }}</span>
                   <span v-if="!accFamilies(a).length" class="muted add-note">{{ t('family.add1') }}</span>
                 </span>
               </template>
@@ -305,7 +306,7 @@
         <option v-for="n in [20, 50, 100, 200]" :value="n">{{ t('pager.perPage', {n}) }}</option>
       </select>
       <span class="muted">{{ t('pager.goto') }}</span>
-      <input class="goto" type="number" min="1" :max="pageCount" :value="page" @change="gotoPage($event)">
+      <input class="goto" type="number" min="1" :max="pageCount" v-model="gotoInput" :placeholder="page" @change="gotoPage">
     </footer>
   </main>
 
@@ -457,7 +458,7 @@
         <span class="muted" :class="{'danger-text': famOver(familyMap[af.id])}">{{ famCount(familyMap[af.id]) }}</span>
       </div>
       <div v-for="m in familyMap[af.id].members" :key="m.account_id" class="fam-member" :class="{me: m.account_id === pop.account.id}">
-        <span class="fam-role" :title="m.role === 'owner' ? t('family.owner') : t('family.member')">{{ m.role === 'owner' ? '👑' : '·' }}</span>
+        <span class="fam-role" :title="m.role === 'owner' ? t('family.owner') : t('family.member')">{{ familyIcons[m.role] }}</span>
         <span class="copy mono ellipsis" :title="m.email" @click="copy(m.email, t('copy.email'))">{{ m.email }}</span>
         <span v-if="famSheetName(m)" class="muted fam-sheet ellipsis">{{ famSheetName(m) }}</span>
         <button v-if="m.account_id !== pop.account.id" class="icon-btn sm" :title="t('family.goto')" @click="famGoto(m)">➜</button>
@@ -465,7 +466,7 @@
       <div v-if="familyMap[af.id].notes" class="muted fam-notes">{{ familyMap[af.id].notes }}</div>
       <div class="editor-row fam-actions">
         <button class="link" @click="famShow(familyMap[af.id])">{{ t('family.showOnly') }}</button>
-        <button v-if="af.role !== 'owner'" class="link" @click="famSetOwner(familyMap[af.id], pop.account.id)">👑 {{ t('family.makeOwner') }}</button>
+        <button v-if="af.role !== 'owner'" class="link" @click="famSetOwner(familyMap[af.id], pop.account.id)">{{ familyIcons.owner }} {{ t('family.makeOwner') }}</button>
         <span class="spacer"></span>
         <button class="link danger-text" @click="famRemove(familyMap[af.id], pop.account.id)">{{ t('family.leave') }}</button>
       </div>
@@ -1168,12 +1169,12 @@ X-API-Token: &lt;API_KEY&gt;
   </div>
 
   <!-- ========== 家庭組管理 ========== -->
-  <div v-if="famEdit" class="modal-mask" @mousedown.self="famEdit = null">
+  <div v-if="famEdit" class="modal-mask" @mousedown.self="famClose">
     <div class="modal wide fam-modal">
       <h3>{{ t('family.manage') }}</h3>
       <div class="fam-layout">
         <div class="fam-list">
-          <div v-for="(f, i) in families" :key="f.id" class="fam-list-item" :class="{active: famEdit.id === f.id}" @click="famEdit.id = f.id; famEdit.q = ''; famEdit.results = []">
+          <div v-for="(f, i) in families" :key="f.id" class="fam-list-item" :class="{active: famEdit.id === f.id}" @click="famSelect(f.id)">
             <span class="fam-icon" :style="{color: f.color}">⌂</span>
             <span class="ellipsis fam-list-name">{{ f.name }}</span>
             <span class="muted" :class="{'danger-text': famOver(f)}">{{ famCount(f) }}</span>
@@ -1184,19 +1185,19 @@ X-API-Token: &lt;API_KEY&gt;
           </div>
           <button class="btn sm fam-new" @click="famNew">＋ {{ t('family.new') }}</button>
         </div>
-        <div v-if="famCur" class="fam-detail">
+        <div v-if="famCur && famEdit.draft" class="fam-detail">
           <div class="fam-form">
             <label class="field">{{ t('family.name') }}
-              <span class="editor-row"><input type="color" :value="famCur.color" @change="famSave('color', $event.target.value)">
-              <input :value="famCur.name" @change="famSave('name', $event.target.value)"></span></label>
+              <span class="editor-row"><input type="color" v-model="famEdit.draft.color" @change="famSave">
+              <input v-model="famEdit.draft.name" @change="famSave"></span></label>
             <label class="field">{{ t('family.kind') }}
-              <input :value="famCur.kind" list="fam-kinds" :placeholder="t('family.kindPh')" @change="famSave('kind', $event.target.value)"></label>
+              <input v-model="famEdit.draft.kind" list="fam-kinds" :placeholder="t('family.kindPh')" @change="famSave"></label>
             <label class="field">{{ t('family.max') }}
-              <input type="number" min="0" :value="famCur.max_members" :title="t('family.maxTip')" @change="famSave('max_members', $event.target.value)"></label>
+              <input type="number" min="0" v-model="famEdit.draft.max_members" :title="t('family.maxTip')" @change="famSave"></label>
           </div>
           <datalist id="fam-kinds"><option v-for="k in familyKinds" :key="k" :value="k"></option></datalist>
           <label class="field">{{ t('col.notes') }}
-            <textarea rows="2" :value="famCur.notes" :placeholder="t('family.notesPh')" @change="famSave('notes', $event.target.value)"></textarea></label>
+            <textarea rows="3" v-model="famEdit.draft.notes" :placeholder="t('family.notesPh')" @change="famSave"></textarea></label>
 
           <div class="fam-members-head">
             <b>{{ t('family.members') }}</b>
@@ -1207,7 +1208,7 @@ X-API-Token: &lt;API_KEY&gt;
           </div>
           <div class="fam-members">
             <div v-for="m in famCur.members" :key="m.account_id" class="fam-row" :class="{owner: m.role === 'owner'}">
-              <span class="fam-role-tag">{{ m.role === 'owner' ? '👑 ' + t('family.owner') : t('family.member') }}</span>
+              <span class="fam-role-tag">{{ familyIcons[m.role] }} {{ m.role === 'owner' ? t('family.owner') : t('family.member') }}</span>
               <span class="copy mono ellipsis" :title="m.email" @click="copy(m.email, t('copy.email'))">{{ m.email }}</span>
               <span class="muted ellipsis fam-sheet">{{ famSheetName(m) }}</span>
               <span class="status" :class="'st-' + statusIndex(m.status)">{{ statusLabel(m.status) }}</span>
@@ -1229,7 +1230,7 @@ X-API-Token: &lt;API_KEY&gt;
                 <template v-if="famCur.members.some(m => m.account_id === r.id)"><span class="muted">{{ t('family.already') }}</span></template>
                 <template v-else>
                   <button class="btn sm" @click="famAdd(r)">{{ t('family.addMember') }}</button>
-                  <button class="btn sm" @click="famAdd(r, 'owner')">👑 {{ t('family.addOwner') }}</button>
+                  <button class="btn sm" @click="famAdd(r, 'owner')">{{ familyIcons.owner }} {{ t('family.addOwner') }}</button>
                 </template>
               </div>
             </div>
@@ -1241,7 +1242,7 @@ X-API-Token: &lt;API_KEY&gt;
       <div class="modal-foot">
         <button v-if="famCur" class="btn danger" @click="famDelete">{{ t('family.delete') }}</button>
         <span class="muted">{{ t('family.hint') }}</span><span class="spacer"></span>
-        <button class="btn primary" @click="famEdit = null">{{ t('btn.ok') }}</button>
+        <button class="btn primary" @click="famClose">{{ t('btn.ok') }}</button>
       </div>
     </div>
   </div>
@@ -1302,6 +1303,7 @@ X-API-Token: &lt;API_KEY&gt;
             <option :value="60">{{ t('autolock.hour') }}</option>
           </select>
         </label>
+        <label v-if="!selfmail" class="full check"><input type="checkbox" v-model="prefs.familyIcons"> {{ t('family.iconsSetting', {o: familyIcons.owner, m: familyIcons.member}) }}</label>
       </div>
       <div class="section-title">{{ t('admin.section') }}</div>
       <div v-if="settings.mail" class="form-grid">
