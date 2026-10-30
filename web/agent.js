@@ -870,7 +870,8 @@ ${learned ? '\n' + learned + '\n' : ''}
           }
           case 'delete_accounts': {
             const rows = this.agentRows(args.filter);
-            return t('agent.confirm.delete', { n: rows.length }) + '\n' + rows.slice(0, 6).map(a => a.email).join('\n') + (rows.length > 6 ? '\n…' : '');
+            return t('agent.confirm.delete', { n: rows.length }) + '\n' + rows.slice(0, 6).map(a => a.email).join('\n') + (rows.length > 6 ? '\n…' : '') +
+              await this.selfmailLinkNote(rows.map(a => a.id));
           }
           case 'move_to_sheet': return t('agent.confirm.move', { n: this.agentRows(args.filter).length, s: args.sheet });
           case 'create_recovery_mailboxes': return t('agent.confirm.mailbox', { n: this.agentRows(args.filter).length, d: args.domain });
@@ -1142,7 +1143,7 @@ ${learned ? '\n' + learned + '\n' : ''}
       const g = this.groups.find(x => x.name.toLowerCase() === name.toLowerCase());
       if (g) return g.id;
       if (!create) throw new Error(`unknown group "${name}"`);
-      const id = await agentCall('add_group', name, color ? this.agentColor(color) : this.randomColor());
+      const id = await agentCall('add_group', name, color ? this.agentColor(color) : this.randomColor(), MODE);
       await this.refreshState();
       return id;
     },

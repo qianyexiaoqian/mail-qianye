@@ -389,6 +389,8 @@ const I18N = {
     'family.iconsShow': "郵箱前顯示家庭組圖標",
     'family.iconStyle': "圖標樣式",
     'family.recommended': "推薦",
+    'selfmail.linkedNote': "主列表裡有 {n} 個郵箱用它當輔助郵箱，它們的輔助郵箱和密碼會一起清空（可在操作記錄裡找回）。",
+    'selfmail.cleared': "已清空主列表裡 {n} 個郵箱的輔助郵箱",
   },
 
   'zh-Hans': {
@@ -780,6 +782,8 @@ const I18N = {
     'family.iconsShow': "邮箱前显示家庭组图标",
     'family.iconStyle': "图标样式",
     'family.recommended': "推荐",
+    'selfmail.linkedNote': "主列表里有 {n} 个邮箱用它当辅助邮箱，它们的辅助邮箱和密码会一起清空（可在操作记录里找回）。",
+    'selfmail.cleared': "已清空主列表里 {n} 个邮箱的辅助邮箱",
   },
 
   en: {
@@ -1171,6 +1175,8 @@ const I18N = {
     'family.iconsShow': "Show family icons before emails",
     'family.iconStyle': "Icon style",
     'family.recommended': "recommended",
+    'selfmail.linkedNote': "{n} accounts in the main list use it as their recovery email; their recovery email and password will be cleared too (recoverable from History).",
+    'selfmail.cleared': "cleared the recovery email of {n} main-list accounts",
   },
 
   ja: {
@@ -1562,6 +1568,8 @@ const I18N = {
     'family.iconsShow': "メールの前にファミリーのアイコンを表示",
     'family.iconStyle': "アイコンのスタイル",
     'family.recommended': "おすすめ",
+    'selfmail.linkedNote': "メインリストの {n} 件がこれを予備メールにしています。それらの予備メールとパスワードも消去されます（操作履歴から復元できます）。",
+    'selfmail.cleared': "メインリスト {n} 件の予備メールを消去しました",
   },
 };
 

@@ -227,7 +227,30 @@ class Store:
             self.conn.execute("INSERT OR IGNORE INTO account_groups(account_id, group_id) "
                               "SELECT id, group_id FROM accounts WHERE group_id IS NOT NULL")
             self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('multi_group', '1')")
+        # 分組按窗口分開：scope = '' 主窗口 / 'selfmail' 自建郵箱窗口
+        if "scope" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(groups)")}:
+            self.conn.execute("ALTER TABLE groups ADD COLUMN scope TEXT NOT NULL DEFAULT ''")
+        if not self.conn.execute("SELECT 1 FROM settings WHERE key='group_scope'").fetchone():
+            self._split_group_scopes()
+            self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('group_scope', '1')")
         self.conn.commit()
+
+    def _split_group_scopes(self):
+        """舊版兩個窗口共用分組：只被自建郵箱用的分組歸自建郵箱窗口；兩邊都在用的複製一份給自建郵箱窗口，成員搬過去。"""
+        c = self.conn
+        selfmail = "(SELECT a.id FROM accounts a JOIN sheets s ON s.id = a.sheet_id WHERE s.kind='selfmail')"
+        for g in c.execute("SELECT * FROM groups").fetchall():
+            in_self = c.execute(f"SELECT COUNT(*) FROM account_groups WHERE group_id=? AND account_id IN {selfmail}", (g["id"],)).fetchone()[0]
+            if not in_self:
+                continue
+            in_main = c.execute(f"SELECT COUNT(*) FROM account_groups WHERE group_id=? AND account_id NOT IN {selfmail}", (g["id"],)).fetchone()[0]
+            if not in_main:
+                c.execute("UPDATE groups SET scope='selfmail' WHERE id=?", (g["id"],))
+                continue
+            new_id = c.execute("INSERT INTO groups(name, color, sort, scope) VALUES (?, ?, ?, 'selfmail')",
+                               (g["name"], g["color"], g["sort"])).lastrowid
+            c.execute(f"UPDATE account_groups SET group_id=? WHERE group_id=? AND account_id IN {selfmail}", (new_id, g["id"]))
+            c.execute(f"UPDATE accounts SET group_id=? WHERE group_id=? AND id IN {selfmail}", (new_id, g["id"]))
 
     def query(self, sql, args=()):
         with self.lock:
@@ -479,10 +502,13 @@ class Api:
 
     # ---------- 分組 ----------
     @need_unlock
-    def add_group(self, name, color="#4f7cff"):
+    def add_group(self, name, color="#4f7cff", scope=""):
+        """scope：'' = 主窗口的分組，'selfmail' = 自建郵箱窗口的分組（兩邊互不影響）。"""
         name = (name or "").strip() or "新分組"
+        scope = "selfmail" if scope == "selfmail" else ""
         return self._store.execute(
-            "INSERT INTO groups(name, color, sort) VALUES (?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM groups))", (name, color))
+            "INSERT INTO groups(name, color, sort, scope) VALUES (?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM groups), ?)",
+            (name, color, scope))
 
     @need_unlock
     def update_group(self, group_id, name, color):
@@ -751,6 +777,8 @@ class Api:
         self._bulk("DELETE FROM family_members WHERE account_id IN ({})", ids)
         self._bulk("DELETE FROM accounts WHERE id IN ({})", ids)
         self._audit_deleted(gone)
+        if rows:
+            return {"recovery_cleared": self._selfmail_clear_recovery([r["email"] for r in rows.values()])}
 
     @need_unlock
     def set_group(self, ids, group_id):
@@ -1046,6 +1074,7 @@ class Api:
         added = updated = removed = 0
         seen, mx = set(), {}
         remote = {(b.get("username") or "").strip().lower() for b in boxes} - {""}
+        pw_changed = {}
         before = self._audit_snapshot([r["id"] for r in local.values()])
         gone = {r["id"]: before[r["id"]] for k, r in local.items() if k not in remote and r["id"] in before}
         cols = ", ".join(FIELDS)
@@ -1079,6 +1108,7 @@ class Api:
                 if pw and self._cipher.decrypt(r["password"]) != pw:
                     sets.append("password=?")
                     args.append(self._cipher.encrypt(pw))
+                    pw_changed[email] = pw
                 if not active and r["status"] != "停用":
                     sets.append("status=?")
                     args.append("停用")
@@ -1095,6 +1125,7 @@ class Api:
             st.conn.commit()
         self._audit_diff({k: v for k, v in before.items() if k not in gone}, actor="sync")
         self._audit_deleted(gone, actor="sync")
+        self._selfmail_sync_recovery(pw_changed, actor="sync")
         if mx:  # 每個域名的郵件服務器，收信時優先嘗試
             cache = self._domain_cache()
             cache.setdefault("mx", {}).update(mx)
@@ -1167,6 +1198,7 @@ class Api:
             before = self._audit_snapshot([row[0]["id"]])
             self._store.execute("UPDATE accounts SET password=?, status=?, updated_at=? WHERE id=?", (enc, status, now, row[0]["id"]))
             self._audit_diff(before)
+            self._selfmail_sync_recovery({email: password})
             if gids:
                 self._change_groups([row[0]["id"]], "add", gids)
             return row[0]["id"]
@@ -1205,6 +1237,46 @@ class Api:
                 if len(new_pw) < 8:
                     raise ValueError("err.selfmail_pw_short")
                 self._selfmail_push(r, password=new_pw)
+                self._selfmail_sync_recovery({r["email"]: new_pw})
+
+    def _selfmail_linked(self, emails):
+        """主列表（非自建郵箱列表）裡把這些自建郵箱用作輔助郵箱的郵箱 id。"""
+        emails = sorted({(e or "").strip().lower() for e in emails or []} - {""})
+        if not emails:
+            return []
+        return [r["id"] for r in self._store.query(
+            "SELECT a.id FROM accounts a JOIN sheets s ON s.id = a.sheet_id "
+            f"WHERE s.kind != 'selfmail' AND lower(a.recovery_email) IN ({','.join('?' for _ in emails)})", emails)]
+
+    def _selfmail_sync_recovery(self, passwords, actor=None):
+        """自建郵箱的密碼變了（改密碼 / 從後台同步）：主列表裡用它當輔助郵箱的，輔助郵箱密碼一起更新。passwords = {郵箱: 新密碼}"""
+        new = {k.lower(): v for k, v in (passwords or {}).items() if v}
+        ids = self._selfmail_linked(new)
+        if not ids:
+            return 0
+        before = self._audit_snapshot(ids)
+        now = int(time.time())
+        changed = [(self._cipher.encrypt(new[r["recovery_email"].lower()]), now, i) for i, r in before.items()
+                   if r["recovery_password"] != new[r["recovery_email"].lower()]]
+        if changed:
+            self._store.executemany("UPDATE accounts SET recovery_password=?, updated_at=? WHERE id=?", changed)
+            self._audit_diff(before, actor=actor)
+        return len(changed)
+
+    def _selfmail_clear_recovery(self, emails):
+        """自建郵箱被刪除：主列表裡用它當輔助郵箱的，清空輔助郵箱和密碼（操作記錄裡能找回原來的值）。"""
+        ids = self._selfmail_linked(emails)
+        if not ids:
+            return 0
+        before = self._audit_snapshot(ids)
+        self._bulk("UPDATE accounts SET recovery_email='', recovery_password='', updated_at=" + str(int(time.time())) + " WHERE id IN ({})", ids)
+        self._audit_diff(before)
+        return len(ids)
+
+    @need_unlock
+    def selfmail_links(self, ids):
+        """刪除前提示用：這些自建郵箱在主列表裡被多少個郵箱用作輔助郵箱。"""
+        return {"linked": len(self._selfmail_linked([r["email"] for r in self._selfmail_ids(ids).values()]))}
 
     def _selfmail_status(self, ids, status):
         """自建郵箱：狀態改成 / 改離「停用」時，在後台停用 / 啟用郵箱。"""
@@ -1902,7 +1974,8 @@ class Api:
                                 "columns": list(ctx["cols"][s["id"]].values())} for s in ctx["sheets"].values()]}, False
         if path == "/api/groups":
             counts = {r["group_id"]: r["n"] for r in self._store.query("SELECT group_id, COUNT(*) AS n FROM account_groups GROUP BY group_id")}
-            return {"groups": [{"id": g["id"], "name": g["name"], "color": g["color"], "count": counts.get(g["id"], 0)}
+            return {"groups": [{"id": g["id"], "name": g["name"], "color": g["color"], "count": counts.get(g["id"], 0),
+                                "scope": "selfmail" if g.get("scope") == "selfmail" else "main"}
                                for g in self._store.query("SELECT * FROM groups ORDER BY sort, id")]}, False
         if path == "/api/families":
             return {"families": [{"id": f["id"], "name": f["name"], "kind": f["kind"], "max_members": f["max_members"], "notes": f["notes"],

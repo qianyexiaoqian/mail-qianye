@@ -829,7 +829,7 @@ const app = createApp({
       call('get_mail_config').then(c => { this.mailCfg = c; this.loadSelfDomains(); }).catch(() => {});
       const st = await call('get_state');
       this.sheets = st.sheets;
-      this.groups = st.groups;
+      this.groups = st.groups.filter(g => (g.scope === 'selfmail') === SELFMAIL);  // 主窗口和自建郵箱窗口的分組互相獨立
       this.families = st.families || [];
       if (SELFMAIL && !this.visibleSheets.length) {  // 第一次打開：建好自建郵箱列表
         await call('selfmail_sheet');
@@ -859,7 +859,7 @@ const app = createApp({
     async refreshState() {
       const st = await call('get_state');
       this.sheets = st.sheets;
-      this.groups = st.groups;
+      this.groups = st.groups.filter(g => (g.scope === 'selfmail') === SELFMAIL);  // 主窗口和自建郵箱窗口的分組互相獨立
       this.families = st.families || [];
     },
     async refreshCodes() {
@@ -977,7 +977,7 @@ const app = createApp({
       for (const g of this.groupEdit) {
         if (!g.name.trim()) continue;
         if (g.id) await call('update_group', g.id, g.name, g.color);
-        else g.id = await call('add_group', g.name, g.color);
+        else g.id = await call('add_group', g.name, g.color, MODE);
         order.push(g.id);
       }
       await call('reorder', 'groups', order);
@@ -1122,7 +1122,7 @@ const app = createApp({
     // 下拉多選裡輸入新名字：新建分組並選中
     async createGroupInto(name, list) {
       try {
-        const id = await call('add_group', name, this.randomColor());
+        const id = await call('add_group', name, this.randomColor(), MODE);
         await this.refreshState();
         if (!list.includes(id)) list.push(id);
       } catch (e) { this.toast(errText(e), 'error'); }
@@ -1477,11 +1477,19 @@ const app = createApp({
       this.toast(isNew ? t('edit.added') : t('edit.saved'));
     },
     async deleteOne(a) {
-      const msg = SELFMAIL ? t('selfmail.deleteOne', { email: a.email }) : t('edit.deleteConfirm', { email: a.email });
+      const msg = SELFMAIL ? t('selfmail.deleteOne', { email: a.email }) + await this.selfmailLinkNote([a.id]) : t('edit.deleteConfirm', { email: a.email });
       if (!(await this.confirm(t('edit.deleteTitle'), msg))) return;
-      try { await call('delete_accounts', [a.id]); } catch (e) { return this.toast(errText(e), 'error'); }
-      await this.afterBulk(t('edit.deleted'));
+      let r;
+      try { r = await call('delete_accounts', [a.id]); } catch (e) { return this.toast(errText(e), 'error'); }
+      await this.afterBulk(t('edit.deleted') + this.selfmailClearedNote(r));
     },
+    // 自建郵箱刪除前：主列表裡有多少個郵箱用它當輔助郵箱（會一起清空）
+    async selfmailLinkNote(ids) {
+      if (!SELFMAIL) return '';
+      const r = await call('selfmail_links', ids).catch(() => ({ linked: 0 }));
+      return r.linked ? '\n\n' + t('selfmail.linkedNote', { n: r.linked }) : '';
+    },
+    selfmailClearedNote(r) { return r?.recovery_cleared ? ' · ' + t('selfmail.cleared', { n: r.recovery_cleared }) : ''; },
     genPassword() {
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%';
       const buf = new Uint32Array(14);
@@ -1533,9 +1541,11 @@ const app = createApp({
     },
     async bulkDelete() {
       const n = this.selectedIds.length;
-      if (!(await this.confirm(t('bulk.deleteTitle'), SELFMAIL ? t('selfmail.deleteMany', { n }) : t('bulk.deleteConfirm', { n })))) return;
-      try { await call('delete_accounts', this.selectedIds); } catch (e) { return this.toast(errText(e), 'error'); }
-      await this.afterBulk(t('bulk.deleted', { n }));
+      const msg = SELFMAIL ? t('selfmail.deleteMany', { n }) + await this.selfmailLinkNote(this.selectedIds) : t('bulk.deleteConfirm', { n });
+      if (!(await this.confirm(t('bulk.deleteTitle'), msg))) return;
+      let r;
+      try { r = await call('delete_accounts', this.selectedIds); } catch (e) { return this.toast(errText(e), 'error'); }
+      await this.afterBulk(t('bulk.deleted', { n }) + this.selfmailClearedNote(r));
     },
     async afterBulk(msg, clear = true) {
       if (clear) this.selected = {};
