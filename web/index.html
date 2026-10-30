@@ -610,7 +610,8 @@
         </label>
         <label>{{ t('col.totp_secret') }}
           <div class="input-row"><input v-model="edit.totp_secret" data-field="totp_secret" class="mono" :placeholder="t('edit.totpPlaceholder')">
-            <span v-if="editCode" class="code sm">{{ fmtCode(editCode) }}</span></div>
+            <span v-if="editCode" class="code sm copy" :class="{warn: remaining <= 5}" :title="t('bc.copyTip')"
+                  @click.prevent="copy(editCode, t('copy.code'))">{{ fmtCode(editCode) }}</span></div>
         </label>
         <label>{{ t('col.recovery_email') }}
           <div class="input-row">
