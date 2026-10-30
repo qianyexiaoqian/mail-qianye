@@ -193,6 +193,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 tr:hover .col-actions .icon-btn { visibility: visible; }
 .col-notes { max-width: 260px; }
 .main-grid .col-notes { max-width: none; }
+.fwd-cell { cursor: pointer; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fwd-cell:hover .mono { color: var(--primary-2); }
+.tag.fwd-only { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); margin-right: 4px; font-size: 11px; }
 .copy { cursor: pointer; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
 .copy:hover { background: var(--primary-soft); color: var(--primary-2); }
 .eye { margin-left: 2px; vertical-align: middle; }

@@ -115,21 +115,21 @@ function fileToThumb(file, max = 128) {
 
 const BASE_COLUMNS = [
   { key: 'index' }, { key: 'email', sort: true }, { key: 'password' }, { key: 'totp' }, { key: 'backup_codes' }, { key: 'recovery_email', sort: true },
-  { key: 'recovery_password' }, { key: 'phone', sort: true }, { key: 'group', sort: true }, { key: 'family', sort: true }, { key: 'status', sort: true },
+  { key: 'recovery_password' }, { key: 'phone', sort: true }, { key: 'forward_to', sort: true }, { key: 'group', sort: true }, { key: 'family', sort: true }, { key: 'status', sort: true },
   { key: 'notes', sort: true }, { key: 'updated', sort: true },
 ];
 const DEFAULT_VISIBLE = { index: true, email: true, password: true, totp: true, backup_codes: true, recovery_email: true, recovery_password: false,
-  phone: false, group: true, family: true, status: true, notes: true, updated: false };
+  phone: false, forward_to: false, group: true, family: true, status: true, notes: true, updated: false };
 // 默認列寬（px），拖動表頭右邊緣可調整，記在 prefs.colWidths
-const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, backup_codes: 96, recovery_email: 230, recovery_password: 140, phone: 140,
+const DEFAULT_WIDTHS = { index: 56, email: 250, password: 140, totp: 110, backup_codes: 96, recovery_email: 230, recovery_password: 140, phone: 140, forward_to: 220,
   group: 100, family: 160, status: 80, notes: 240, updated: 140 };
 const DEFAULT_CUSTOM_WIDTHS = { text: 140, color: 70, country: 90, emoji: 90, image: 70 };
 const MIN_COL_WIDTH = 50;
 const INBOX_PAGE = 15;  // 收件箱每次刷新取的數量，「加載更多」每次多取 50 封
 const INBOX_MORE = 50;
-// 自建郵箱窗口默認顯示的列：密碼要看，2FA / 輔助郵箱用不上
+// 自建郵箱窗口默認顯示的列：密碼、轉發要看，2FA / 輔助郵箱用不上
 const SELFMAIL_VISIBLE = { index: true, email: true, password: true, totp: false, recovery_email: false, recovery_password: false,
-  phone: false, group: true, status: true, notes: true, updated: true };
+  phone: false, forward_to: true, group: true, status: true, notes: true, updated: true };
 const DEFAULT_FILTERS = { group: '', family: '', status: '', domain: '', twofa: '', recovery: '', country: '' };
 // 家庭組類型（輸入框的候選），人數上限含組長
 const FAMILY_KINDS = ['Google One', 'YouTube Premium', 'Microsoft 365', 'Apple', 'Spotify', 'Netflix', 'ChatGPT Team'];
@@ -254,7 +254,8 @@ const app = createApp({
 
     // 所有列（含隱藏的）的默認順序
     defaultColumns() {
-      const cols = BASE_COLUMNS.filter(c => !(SELFMAIL && c.key === 'family')).map(c => ({ ...c, label: t('col.' + c.key) }));
+      // 家庭組只在主窗口，轉發只在自建郵箱窗口
+      const cols = BASE_COLUMNS.filter(c => c.key !== (SELFMAIL ? 'family' : 'forward_to')).map(c => ({ ...c, label: t('col.' + c.key) }));
       const custom = this.currentSheet.columns.map(col => ({ key: 'x_' + col.id, label: col.name, custom: true, col, sort: col.type !== 'image' }));
       const i = cols.findIndex(c => c.key === 'notes');  // 自定義列放在備註前面
       if (i >= 0) cols.splice(i, 0, ...custom); else cols.push(...custom);
@@ -908,7 +909,7 @@ const app = createApp({
       });
     },
     searchFields(a) {
-      const out = [a.email, a.recovery_email, a.phone, a.notes, this.accGroupNames(a).join(' '), this.accFamilyNames(a).join(' '), this.statusLabel(a.status)];
+      const out = [a.email, a.recovery_email, a.phone, a.notes, a.forward_to, this.accGroupNames(a).join(' '), this.accFamilyNames(a).join(' '), this.statusLabel(a.status)];
       for (const col of this.currentSheet.columns) {
         const v = a.extra?.[col.id];
         if (!v || col.type === 'image' || col.type === 'color') continue;
@@ -1533,6 +1534,22 @@ const app = createApp({
       try { await call('set_status', this.selectedIds, v); } catch (e) { this.toast(errText(e), 'error'); }
       await this.afterBulk(t('bulk.statusDone'), false);
     },
+    // 自建郵箱：批量設置 / 取消轉發（覆蓋原來的目標）
+    async bulkForward(e) {
+      const v = e.target.value; e.target.value = '';
+      if (!v) return;
+      const ids = this.selectedIds, n = ids.length;
+      let text = '';
+      if (v === 'set') {
+        text = await this.prompt(t('forward.bulkTitle', { n }), t('forward.bulkMsg'));
+        if (!text) return;
+      } else if (!(await this.confirm(t('forward.clearTitle'), t('forward.clearMsg', { n }), t('forward.clear')))) return;
+      let r;
+      try { r = await call('selfmail_set_forward', ids, text); } catch (err) { return this.toast(errText(err), 'error'); }
+      if (r.failed.length) this.toast(t('forward.failed', { n: r.failed.length }) + r.failed.slice(0, 3).map(f => `${f.email}：${errText(new Error(f.error))}`).join('；'), 'error');
+      await this.afterBulk(t(v === 'set' ? 'forward.setDone' : 'forward.clearDone', { n: r.ok }), !r.failed.length);
+    },
+    fwdList(a) { return (a.forward_to || '').split('\n').filter(Boolean); },
     async bulkMove(e) {
       const v = e.target.value; e.target.value = '';
       if (!v) return;

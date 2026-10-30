@@ -5,6 +5,7 @@
 /api 受「安全入口」保護，所以先訪問一次安全入口路徑拿到 session cookie。
 """
 import json
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -149,6 +150,65 @@ class BillionMailAdmin:
         j = self._authed("POST", "/api/mailbox/delete", {"emails": list(emails)})
         if j.get("code") not in (0, None) or j.get("success") is False:
             raise RuntimeError(f"err.admin_delete|{j.get('msg') or j.get('message') or j.get('code')}")
+
+    # ---------- 郵件轉發（後台的 alias 表）----------
+    # 後台投遞時郵箱自己和轉發目標都會收到（郵箱停用後只轉發），所以目標裡不放郵箱自己。
+    # 修改接口會把多個目標當成一個地址校驗，所以改轉發 = 刪掉再新建。
+    def _forward_page(self, page, size=100, keyword=""):
+        q = f"/api/mail_forward/list?page={page}&page_size={size}"
+        if keyword:
+            q += "&search_key=" + urllib.parse.quote(keyword)
+        try:
+            j = self._authed("GET", q)
+        except PermissionError as e:  # 沒有這個接口（舊版後台）
+            if str(e).endswith("|404"):
+                raise RuntimeError("err.forward_unsupported") from None
+            raise
+        if j.get("code") == 404:
+            raise RuntimeError("err.forward_unsupported")
+        if j.get("code") not in (0, None) or j.get("success") is False:
+            raise RuntimeError(f"err.admin_forward|{j.get('msg') or j.get('message') or j.get('code')}")
+        data = j.get("data") or {}
+        return [{"address": (a.get("address") or "").strip().lower(), "active": str(a.get("active", 1)) not in ("0", "False", "false"),
+                 "goto": [g.strip().lower() for g in re.split(r"[\s,]+", a.get("goto") or "") if g.strip()]}
+                for a in data.get("list") or [] if a.get("address")], int(data.get("total") or 0)
+
+    def all_forwards(self):
+        """後台裡的全部轉發：[{"address", "goto": [目標…], "active"}]。後台版本太舊、沒有轉發接口時拋 err.forward_unsupported。"""
+        out, page = [], 1
+        while True:
+            lst, total = self._forward_page(page)
+            out.extend(lst)
+            if not lst or len(out) >= total or page > 200:
+                return out
+            page += 1
+
+    def get_forward(self, address):
+        lst, _ = self._forward_page(1, 50, address)
+        return next((a for a in lst if a["address"] == address.lower()), None)
+
+    def set_forward(self, address, targets, known=None):
+        """把 address 的轉發目標設成 targets（覆蓋）；targets 為空 = 刪掉轉發。和後台現有的一樣就不動。
+        known：all_forwards() 的結果按地址索引（批量設置時一次取完），不給就單獨查。"""
+        address = address.lower()
+        targets = [t.lower() for t in targets or []]
+        cur = known.get(address) if known is not None else self.get_forward(address)
+        if not targets:
+            if cur:
+                self.delete_forward(address)
+            return
+        if cur and cur["active"] and cur["goto"] == targets:
+            return
+        if cur:
+            self.delete_forward(address)
+        j = self._authed("POST", "/api/mail_forward/add", {"address": address, "goto": "\n".join(targets), "active": 1})
+        if j.get("code") not in (0, None) or j.get("success") is False:
+            raise RuntimeError(f"err.admin_forward|{j.get('msg') or j.get('message') or j.get('code')}")
+
+    def delete_forward(self, address):
+        j = self._authed("POST", "/api/mail_forward/delete", {"address": address.lower()})
+        if j.get("code") not in (0, None) or j.get("success") is False:
+            raise RuntimeError(f"err.admin_forward|{j.get('msg') or j.get('message') or j.get('code')}")
 
     def list_mailboxes(self):
         """返回所有郵箱地址（測試連接用）。"""

@@ -42,7 +42,8 @@ FIELDS = ["email", "password", "totp_secret", "backup_codes", "recovery_email", 
 AUDIT_MAX = 9999
 _ACTOR = threading.local()  # 當前調用的操作人：前端用 call_as 標明（AI 助手 = agent），默認 user
 SECRET_FIELDS = ("password", "totp_secret", "backup_codes", "recovery_password", "oauth_token")  # 加密存儲的字段
-AUDIT_FIELDS = FIELDS + ["status"]  # 這些字段變了會記進操作記錄
+AUDIT_FIELDS = FIELDS + ["status", "forward_to"]  # 這些字段變了會記進操作記錄
+# forward_to：自建郵箱的轉發目標（一行一個），只有自建郵箱列表用，改了會寫到 BillionMail 後台
 # backup_codes：一次性備用碼（例如 Google 的 10 個），一行一個，已用過的前面加「~」
 # 微軟 OAuth2（帶令牌）的輔助郵箱：oauth_client_id = 應用 ClientID，oauth_token = refresh token
 
@@ -192,6 +193,22 @@ def clean_secret(secret):
     return re.sub(r"[\s-]", "", secret).upper()
 
 
+FORWARD_EMAIL_RE = re.compile(r"[^@\s<>\"']+@[^@\s<>\"']+\.[^@\s<>\"'.]+")
+
+
+def parse_forward(text, own=""):
+    """自建郵箱的轉發目標：換行 / 逗號 / 分號 / 空格隔開都行 → 小寫、去重、去掉郵箱自己，一行一個。"""
+    out = []
+    for t in re.split(r"[\s,;，；、]+", text or ""):
+        t = t.strip().strip("<>").lower()
+        if not t or t == (own or "").lower() or t in out:
+            continue
+        if not FORWARD_EMAIL_RE.fullmatch(t):
+            raise ValueError(f"err.forward_bad|{t}")
+        out.append(t)
+    return "\n".join(out)
+
+
 def totp_now(secret):
     s = clean_secret(secret)
     if not s:
@@ -216,7 +233,7 @@ class Store:
     def _migrate(self):
         """為舊版數據庫補上新增的列。"""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(accounts)")}
-        for col in ("oauth_client_id", "oauth_token", "backup_codes"):
+        for col in ("oauth_client_id", "oauth_token", "backup_codes", "forward_to"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         # 列表類型：'' = 普通列表，'selfmail' = 自建郵箱管理窗口用的列表（和 BillionMail 後台同步）
@@ -746,14 +763,19 @@ class Api:
         group_id = gids[0] if gids else None
         extra = json.dumps(data.get("extra") or {}, ensure_ascii=False)
         if data.get("id"):
-            self._selfmail_check_updates([(data["id"], {"email": data.get("email"), "password": data.get("password") or ""})])
-            self._selfmail_status([data["id"]], status)
+            checks = {"email": data.get("email"), "password": data.get("password") or ""}
+            if "forward_to" in data:
+                checks["forward_to"] = data.get("forward_to") or ""
+            forwards = self._selfmail_check_updates([(data["id"], checks)])
+            self._selfmail_status([data["id"]], status, forwards)
             before = self._audit_snapshot([data["id"]])
             sets = ", ".join(f"{f}=?" for f in FIELDS)
             self._store.execute(
                 f"UPDATE accounts SET {sets}, status=?, group_id=?, extra=?, updated_at=? WHERE id=?",
                 [values[f] for f in FIELDS] + [status, group_id, extra, now, data["id"]],
             )
+            if forwards:
+                self._store.execute("UPDATE accounts SET forward_to=? WHERE id=?", (forwards[int(data["id"])], data["id"]))
             self._change_groups([data["id"]], "set", gids)
             self._audit_diff(before)
             return data["id"]
@@ -771,7 +793,9 @@ class Api:
     def delete_accounts(self, ids):
         rows = self._selfmail_ids(ids)
         if rows:  # 自建郵箱：先在後台刪除，成功了再刪本地
-            self._admin_client(self._admin_cfg()).delete_mailboxes([r["email"] for r in rows.values()])
+            client = self._admin_client(self._admin_cfg())
+            client.delete_mailboxes([r["email"] for r in rows.values()])
+            self._selfmail_drop_forwards(client, [r["email"] for r in rows.values()])
         gone = self._audit_snapshot(ids)
         self._bulk("DELETE FROM account_groups WHERE account_id IN ({})", ids)
         self._bulk("DELETE FROM family_members WHERE account_id IN ({})", ids)
@@ -799,12 +823,14 @@ class Api:
     def update_fields(self, updates):
         """批量改字段：updates = [{"id": 1, "fields": {"notes": "...", "phone": "..."}}]，只改給出的字段。"""
         now = int(time.time())
-        self._selfmail_check_updates([(u["id"], u.get("fields") or {}) for u in updates or []])
+        forwards = self._selfmail_check_updates([(u["id"], u.get("fields") or {}) for u in updates or []])
         before = self._audit_snapshot([u["id"] for u in updates or []])
         st = self._store
         with st.lock:
             for u in updates or []:
                 fields = {k: str(v if v is not None else "").strip() for k, v in (u.get("fields") or {}).items() if k in FIELDS}
+                if int(u["id"]) in forwards:  # 自建郵箱的轉發（已經寫到後台）
+                    fields["forward_to"] = forwards[int(u["id"])]
                 if not fields:
                     continue
                 if "totp_secret" in fields:
@@ -1066,13 +1092,18 @@ class Api:
 
     def _selfmail_sync(self):
         cfg = self._admin_cfg()
-        boxes = self._admin_client(cfg).all_mailboxes()
+        client = self._admin_client(cfg)
+        boxes = client.all_mailboxes()
+        try:
+            forwards = {f["address"]: f for f in client.all_forwards()}
+        except Exception:
+            forwards = None  # 舊版後台沒有轉發接口：本地的轉發保持不動
         sid = self.selfmail_sheet()
         local = {r["email"].lower(): r for r in
                  self._store.query("SELECT id, email, password, status FROM accounts WHERE sheet_id=?", (sid,))}
         now = int(time.time())
         added = updated = removed = 0
-        seen, mx = set(), {}
+        seen, counted, mx = set(), set(), {}
         remote = {(b.get("username") or "").strip().lower() for b in boxes} - {""}
         pw_changed = {}
         before = self._audit_snapshot([r["id"] for r in local.values()])
@@ -1118,10 +1149,20 @@ class Api:
                 if sets:
                     st.conn.execute(f"UPDATE accounts SET {', '.join(sets)}, updated_at=? WHERE id=?", args + [now, r["id"]])
                     updated += 1
+                    counted.add(key)
             for key, r in local.items():
                 if key not in seen:  # 後台已經沒有了
                     st.conn.execute("DELETE FROM accounts WHERE id=?", (r["id"],))
                     removed += 1
+            if forwards is not None:  # 轉發以後台為準；目標裡郵箱自己那條不顯示（後台本來就會投遞給它）
+                for r in st.conn.execute("SELECT id, email, forward_to FROM accounts WHERE sheet_id=?", (sid,)).fetchall():
+                    own = r["email"].lower()
+                    f = forwards.get(own)
+                    fwd = "\n".join(dict.fromkeys(g for g in f["goto"] if g != own)) if f and f["active"] else ""
+                    if fwd != r["forward_to"]:
+                        st.conn.execute("UPDATE accounts SET forward_to=?, updated_at=? WHERE id=?", (fwd, now, r["id"]))
+                        if own in local and own not in counted:
+                            updated += 1
             st.conn.commit()
         self._audit_diff({k: v for k, v in before.items() if k not in gone}, actor="sync")
         self._audit_deleted(gone, actor="sync")
@@ -1224,8 +1265,12 @@ class Api:
             self._pw_cache[row["email"]] = password
 
     def _selfmail_check_updates(self, updates):
-        """自建郵箱列表的行：郵箱地址不能改；改了密碼就同步到後台。updates = [(id, {字段: 新值})]"""
+        """自建郵箱列表的行：郵箱地址不能改；改了密碼 / 轉發就同步到後台。updates = [(id, {字段: 新值})]
+        返回整理好的轉發目標 {id: forward_to}（只含自建郵箱裡給了 forward_to 的行），由調用方寫進本地。"""
         rows = self._selfmail_ids([i for i, _ in updates])
+        forwards = {int(i): parse_forward(f["forward_to"], rows[int(i)]["email"])  # 先檢查格式，不對就一個都不寫
+                    for i, f in updates if int(i) in rows and "forward_to" in f}
+        client = None
         for i, fields in updates:
             r = rows.get(int(i))
             if r is None:
@@ -1238,6 +1283,45 @@ class Api:
                     raise ValueError("err.selfmail_pw_short")
                 self._selfmail_push(r, password=new_pw)
                 self._selfmail_sync_recovery({r["email"]: new_pw})
+            fwd = forwards.get(r["id"])
+            if fwd is not None and fwd != (r.get("forward_to") or ""):
+                client = client or self._admin_client(self._admin_cfg())
+                client.set_forward(r["email"], fwd.split("\n") if fwd else [])
+        return forwards
+
+    @need_unlock
+    def selfmail_set_forward(self, ids, text):
+        """批量設置轉發（覆蓋原來的目標；text 為空 = 取消轉發），逐個寫到後台，失敗的不影響其他。
+        返回 {"ok": 成功數, "failed": [{"email", "error"}]}"""
+        rows = self._selfmail_ids(ids)
+        if not rows:
+            return {"ok": 0, "failed": []}
+        parsed = {i: parse_forward(text, r["email"]) for i, r in rows.items()}
+        client = self._admin_client(self._admin_cfg())
+        known = {f["address"]: f for f in client.all_forwards()}  # 一次取完，不用逐個查
+        before = self._audit_snapshot(list(rows))
+        ok, failed, now = [], [], int(time.time())
+        for i, r in rows.items():
+            try:
+                client.set_forward(r["email"], parsed[i].split("\n") if parsed[i] else [], known=known)
+            except Exception as e:
+                failed.append({"email": r["email"], "error": str(e)})
+                continue
+            ok.append((parsed[i], now, i))
+        if ok:
+            self._store.executemany("UPDATE accounts SET forward_to=?, updated_at=? WHERE id=?", ok)
+            self._audit_diff(before)
+        return {"ok": len(ok), "failed": failed}
+
+    def _selfmail_drop_forwards(self, client, emails):
+        """刪除自建郵箱時把它的轉發也刪掉：後台刪郵箱不會刪轉發，留著的話發給這個地址的信還會被轉走。"""
+        try:
+            have = {f["address"] for f in client.all_forwards()}
+            for e in emails:
+                if e.lower() in have:
+                    client.delete_forward(e)
+        except Exception:
+            pass  # 舊版後台沒有轉發接口；郵箱已經刪掉了，這裡失敗不影響刪除
 
     def _selfmail_linked(self, emails):
         """主列表（非自建郵箱列表）裡把這些自建郵箱用作輔助郵箱的郵箱 id。"""
@@ -1278,11 +1362,19 @@ class Api:
         """刪除前提示用：這些自建郵箱在主列表裡被多少個郵箱用作輔助郵箱。"""
         return {"linked": len(self._selfmail_linked([r["email"] for r in self._selfmail_ids(ids).values()]))}
 
-    def _selfmail_status(self, ids, status):
-        """自建郵箱：狀態改成 / 改離「停用」時，在後台停用 / 啟用郵箱。"""
+    def _selfmail_status(self, ids, status, forwards=None):
+        """自建郵箱：狀態改成 / 改離「停用」時，在後台停用 / 啟用郵箱。停用後轉發照常生效（只轉發，郵箱自己不再收）。
+        forwards：這次一起改的轉發目標 {id: forward_to}，沒給的用本地現有的。"""
         for r in self._selfmail_ids(ids).values():
             if (status == "停用") != (r["status"] == "停用"):
                 self._selfmail_push(r, active=0 if status == "停用" else 1)
+                fwd = (forwards or {}).get(r["id"], r.get("forward_to") or "")
+                if status == "停用" and fwd:
+                    # 後台的轉發目標裡如果有郵箱自己（在後台手動加的），停用後發給它的信會被部分退回，這裡重寫一遍去掉
+                    try:
+                        self._admin_client(self._admin_cfg()).set_forward(r["email"], fwd.split("\n"))
+                    except Exception:
+                        pass
 
     @need_unlock
     def fetch_mail(self, account_id, which="recovery", limit=None):

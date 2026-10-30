@@ -37,7 +37,7 @@ const AGENT_FILTER = {
       items: {
         type: 'object',
         properties: {
-          field: { type: 'string', description: 'email, recovery_email, recovery_domain, domain, phone, notes, status, group, family（家庭組名）, family_role（owner=組長 / member=成員 / 空=沒加入）, password, totp_secret, recovery_password, oauth_client_id, oauth_token, created_at, updated_at，或自定義列名' },
+          field: { type: 'string', description: 'email, recovery_email, recovery_domain, domain, phone, notes, status, group, family（家庭組名）, family_role（owner=組長 / member=成員 / 空=沒加入）, forward_to（自建郵箱的轉發目標）, password, totp_secret, recovery_password, oauth_client_id, oauth_token, created_at, updated_at，或自定義列名' },
           op: { type: 'string', enum: ['eq', 'ne', 'contains', 'not_contains', 'starts_with', 'ends_with', 'empty', 'not_empty', 'regex', 'gt', 'lt', 'in'] },
           value: { description: '比較值；in 用數組；日期用 YYYY-MM-DD' },
         },
@@ -213,7 +213,10 @@ const AGENT_SELFMAIL_TOOLS = [
     password: { type: 'string', description: '統一密碼（至少 8 位），留空 = 隨機' },
     group: { type: 'string', description: '加入的分組，不存在自動創建' },
   }),
-  agentFn('sync_mailboxes', '從 BillionMail 後台同步：後台新增的郵箱加進列表，後台刪掉的從列表移除，密碼和停用狀態更新'),
+  agentFn('sync_mailboxes', '從 BillionMail 後台同步：後台新增的郵箱加進列表，後台刪掉的從列表移除，密碼、停用狀態和轉發更新'),
+  agentFn('set_forwarding', '設置郵件轉發（替換原來的轉發目標，寫到後台）：郵件會同時發到郵箱自己和 to 裡的郵箱；停用的郵箱只轉發。to 為空數組 = 取消轉發', {
+    filter: AGENT_FILTER, to: { type: 'array', items: { type: 'string' }, description: '轉發到的郵箱，不用寫郵箱自己' },
+  }, ['filter', 'to']),
 ];
 // 操作電腦：文件和命令（設置裡可關閉）。讀取 / 搜索文件內容、寫入、移動會先讓用戶確認（自動執行模式下讀寫不確認），執行命令總是確認
 const AGENT_PATH = { type: 'string', description: '路徑，例如 E:\\workspace\\號池。用戶給的路徑原樣傳入（少了冒號、正反斜槓都可以），不存在時返回相近的名字' };
@@ -288,7 +291,7 @@ function agentConfirmLevel(name, args) {
   if (name === 'run_command') return 'danger';
   if (['fs_read', 'fs_search', 'fs_write', 'fs_move', 'fs_mkdir'].includes(name)) return 'write';
   if (name === 'export_accounts' && args.path) return 'write';
-  if (['update_accounts', 'add_accounts', 'import_text', 'move_to_sheet', 'create_recovery_mailboxes', 'create_mailboxes'].includes(name)) return 'write';
+  if (['update_accounts', 'add_accounts', 'import_text', 'move_to_sheet', 'create_recovery_mailboxes', 'create_mailboxes', 'set_forwarding'].includes(name)) return 'write';
   return '';
 }
 
@@ -613,6 +616,8 @@ const AgentMixin = {
         case 'create_mailboxes': return t('agent.sum.mailboxes', { n: out.created || 0, f: out.failed?.length || 0 }) +
           (out.in_group != null ? ' · ' + t('agent.sum.inGroup', { n: out.in_group }) : '');
         case 'sync_mailboxes': return t('selfmail.synced', { n: out.total, a: out.added, u: out.updated, d: out.removed });
+        case 'set_forwarding': return t(out.to?.length ? 'forward.setDone' : 'forward.clearDone', { n: out.forwarded }) +
+          (out.failed?.length ? ' · ' + t('agent.sum.failed', { n: out.failed.length }) : '');
         case 'get_2fa_codes': return t('agent.sum.found', { n: out.codes?.length || 0 });
         case 'fetch_mail': return t('agent.sum.mails', { n: out.messages?.length || 0 });
         case 'undo': return out.undone || '✓';
@@ -719,6 +724,7 @@ ${SELFMAIL ? `
 你現在在「自建郵箱管理」窗口：表格裡的每一行就是 BillionMail 後台的一個真實郵箱（郵箱 + 登錄密碼）。
 - 新建郵箱用 create_mailboxes（會在後台創建）；delete_accounts 會在後台刪除郵箱，不可撤銷；修改密碼、把狀態改成 / 改離「停用」會同步到後台，也不可撤銷。分組、備註、自定義列只存在本地，可以撤銷。
 - 用戶說「同步 / 刷新列表」用 sync_mailboxes；收郵件、驗證碼用 fetch_mail({email, which:"email"})。
+- 「把 xx 轉發到 a@gmail.com」→ set_forwarding({filter, to:["a@gmail.com"]})；郵箱自己照樣收信，停用後只轉發；「取消轉發」→ to:[]。每行的 forward_to 是現在的轉發目標（篩選條件也能用 forward_to）。
 - 可用域名：${JSON.stringify(this.selfDomains)}` : ''}
 ${learned ? '\n' + learned + '\n' : ''}
 當前狀態：${JSON.stringify(ctx)}`;
@@ -821,6 +827,13 @@ ${learned ? '\n' + learned + '\n' : ''}
         }
         case 'save_skill': return this.agentUpsertSkill({ name: args.name, description: args.description, content: args.content }, 'ai');
         case 'create_mailboxes': return this.agentCreateMailboxes(args, tc);
+        case 'set_forwarding': {
+          const rows = this.agentRows(args.filter);
+          if (!rows.length) return { error: 'no rows matched' };
+          const r = await agentCall('selfmail_set_forward', rows.map(a => a.id), (args.to || []).join('\n'));
+          await this.loadAccounts();
+          return { forwarded: r.ok, to: args.to || [], failed: r.failed };
+        }
         case 'sync_mailboxes': {
           const r = await agentCall('selfmail_sync');
           await this.loadAccounts();
@@ -867,6 +880,11 @@ ${learned ? '\n' + learned + '\n' : ''}
             return t('agent.confirm.mailboxes', { n, d: args.domain || (args.names || []).map(x => String(x).split('@')[1]).filter(Boolean)[0] || '—' }) +
               (args.names?.length ? '\n' + args.names.slice(0, 6).join('\n') + (args.names.length > 6 ? '\n…' : '') : '') +
               (args.group ? '\n' + kv({ group: args.group }) : '');
+          }
+          case 'set_forwarding': {
+            const rows = this.agentRows(args.filter), to = args.to || [];
+            return t('agent.confirm.forward', { n: rows.length }) + '\n' + rows.slice(0, 6).map(a => a.email).join('\n') + (rows.length > 6 ? '\n…' : '') +
+              '\n→ ' + (to.length ? to.join(', ') : t('forward.clear'));
           }
           case 'delete_accounts': {
             const rows = this.agentRows(args.filter);
@@ -1017,6 +1035,7 @@ ${learned ? '\n' + learned + '\n' : ''}
         case 'status': return a.status;
         case 'group': return this.accGroupNames(a).join(', ');
         case 'family': return this.accFamilyNames(a).join(', ');
+        case 'forward_to': return SELFMAIL ? (a.forward_to || '').split('\n').filter(Boolean).join(', ') : undefined;
         case 'family_role': { const fs = this.accFamilies(a); return fs.some(f => f.role === 'owner') ? 'owner' : fs.length ? 'member' : ''; }
         case 'domain': return domainOf(a.email);
         case 'recovery_domain': return domainOf(a.recovery_email);
